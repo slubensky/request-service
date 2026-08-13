@@ -1,0 +1,113 @@
+# Request Service — Agent Guide
+
+## Purpose
+This repository is maintained with a spec-first, test-first, security-conscious workflow. Keep solutions simple, reviewable, and aligned with the current spec.
+
+## Core rules
+- Always update the spec before changing behavior. Include the date and the time of the latest edit.
+- Always write or update tests before or alongside code changes.
+- Always run the required tests before proposing completion.
+- Never merge or recommend merge when any required test is failing.
+- Prefer the simplest architecture that satisfies the current spec.
+- Never mass edit more than 3 files without showing me the plan first.
+- If a task takes more than 5 steps, create a plan document first.
+
+## Architecture
+- Keep architecture minimal and easy to understand.
+- Prefer a modular monolith unless the spec explicitly requires otherwise.
+- Minimize dependencies, abstractions, background workers, and operational complexity.
+- Do not introduce new frameworks, services, or patterns without documenting the need in the spec.
+- Optimize for maintainability and reviewability over cleverness.
+
+## Security
+- Treat all changes as security-relevant unless clearly proven otherwise.
+- Follow OWASP secure coding practices and use OWASP ASVS as the verification baseline.
+- Apply secure defaults, least privilege, defense in depth, fail-safe behavior, and complete mediation.
+- Validate and sanitize all untrusted input.
+- Use parameterized queries and safe APIs for database access.
+- Enforce authentication and authorization on every sensitive path.
+- Never hardcode secrets, tokens, or credentials.
+- Never expose secrets or sensitive data in code, logs, tests, fixtures, or diffs.
+- Use approved cryptographic libraries only; never invent crypto.
+- Avoid unsafe deserialization, shell execution, dynamic code execution, and unnecessary outbound network access.
+- Log security-relevant events without leaking sensitive data.
+- Add or update security tests when auth, access control, input validation, data handling, or external interfaces are affected.
+- Never store data in the code, such as email addresses, user names, passwords
+
+## Required workflow
+For every task, follow this order:
+1. Update the spec.
+2. Write or update tests.
+3. Implement the code.
+4. Run relevant tests.
+5. Confirm all tests pass.
+6. Only then consider the change ready for review or merge.
+
+## Spec policy
+- The spec is the source of truth.
+- Every behavior change must be reflected in the spec.
+- Update assumptions, acceptance criteria, architecture notes, and security impact in the spec.
+- If the request is ambiguous or conflicts with the current spec, stop and resolve the spec first.
+- Do not leave undocumented behavior changes.
+
+## Testing policy
+- Add unit tests for logic changes.
+- Add integration tests for boundary behavior and cross-component behavior.
+- Add regression tests for bug fixes.
+- Add security-oriented tests when the change touches risky areas.
+- Run fast scoped tests during iteration, then run the required full test suite before completion.
+- Do not treat skipped, missing, or failing tests as acceptable without explicit justification in the spec.
+
+## Reviewability requirements
+Every change must be easy for a human reviewer to inspect. Include the following in every PR or handoff:
+- Spec diff: what changed and why.
+- Test diff: which tests were added or updated.
+- Risk notes: security, migration, operational, and rollback considerations.
+- Test evidence: exact commands run and results.
+- Scope statement: what is intentionally not included.
+
+When making changes:
+- Prefer small, focused diffs.
+- Avoid mixing refactors with feature changes unless required.
+- Keep naming explicit and consistent.
+- Remove dead code created by the change.
+- Document non-obvious tradeoffs briefly in the spec or PR notes.
+
+## Merge gate
+A change is merge-ready only if all of the following are true:
+- The spec is updated.
+- Tests were added or updated appropriately.
+- The implementation matches the spec.
+- All required tests pass.
+- No critical or high-severity security issue is introduced.
+- Risks, limitations, and follow-ups are documented.
+
+## Failure handling
+- If tests fail, do not merge.
+- If the spec is outdated, update it before proceeding.
+- If a secure implementation is not feasible, stop and document the risk instead of shipping a weaker workaround.
+
+## Response format for Claude
+When completing a coding task, respond with:
+1. Spec changes
+2. Tests added or updated
+3. Code changes
+4. Test commands executed
+5. Test results
+6. Risks or follow-ups
+
+## Performance targets
+
+| Requirement | Target |
+| --- | --- |
+| Time to first token | < 400 ms (p95) |
+| Time to segment annotation render | < 600 ms (p95, JSON parsed before first text token) |
+| Full response time | < 3 s (p95, typical decode) |
+| Page load (cold) | < 100 ms (no framework, no bundler) |
+| Concurrent users | 50 simultaneous (single process; scale horizontally if needed) |
+| Availability | Best-effort; depends on Claude API uptime |
+| HTTPS | Required in production (terminate at reverse proxy or platform) |
+
+## Branch
+`main` is the canonical source of truth. Develop on a short-lived feature branch and open a pull request into `main` — do not commit directly to `main`. CI (tests + `terraform validate`) must pass before merge.
+
