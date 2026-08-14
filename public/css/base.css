@@ -114,7 +114,8 @@ body {
   font-size: var(--font-size-base);
 }
 
-.stack-form input {
+.stack-form input,
+.stack-form select {
   padding: var(--space-2);
   font-size: var(--font-size-base);
   color: var(--color-fg);
@@ -151,6 +152,31 @@ button {
 }
 
 .bathrooms .empty {
+  color: var(--color-muted);
+}
+
+.invites {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-3) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.invite {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.invite-role {
+  color: var(--color-muted);
+  text-transform: capitalize;
+}
+
+.invites .empty {
   color: var(--color-muted);
 }
 

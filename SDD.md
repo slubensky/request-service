@@ -7,6 +7,9 @@
 > **Last edited:** 2026-08-14 18:57 UTC — Phase 1 (Task 16): documented the **SMS OTP activation path** (new §6.1). Records the choice-based passwordless Cognito configuration (SMS_OTP first-auth factor, SNS delivery, auto-verified `phone_number`; `terraform validate`-only, no live apply), the single Hosted UI login entry point and factor-shared `/auth/callback`, and the rule that the server persists a `User.phone` only when the ID token reports it verified (`phone_number_verified`). No role-model or data-model change; reserves §6.2 for the following passkey/WebAuthn task. Per AGENTS.md spec policy, edit date/time recorded here.
 >
 > **Status:** Approved for Phase 0 build. Source of truth for coders; mirrors the reviewed Blueprint (`art_RUHUe0PF`, v0.3).
+> **Last edited:** 2026-08-14 18:00 UTC — Phase 1, Manager invitation flow: documented the HTTP surface (§11.4) an authorized Site Manager uses to invite additional members (manager or assistant) to their own site, generalizing the Company Admin's initial-manager invite. Clarified §2 that a Manager also invites/promotes/revokes additional managers, not only assistants. No new capability, role, or migration — this reuses the `invite_site_role` / `site_role:invite` matrix entry (§7) and the existing SiteRole schema (§4) unchanged. Per AGENTS.md spec policy, edit date/time recorded here.
+>
+> **Status:** Approved for Phase 0 build; Phase 1 manager invitation flow in review. Source of truth for coders; mirrors the reviewed Blueprint (`art_RUHUe0PF`, v0.3).
 
 ## 1. Purpose & scope
 
@@ -50,12 +53,12 @@ Any of the above may become in-scope in a later phase, but each requires a spec 
 
 ## 2. Actors & roles
 
-| Actor                         | Description                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Company Admin**             | Platform-level internal operator (`platform_role=company_admin`) — **not** a SiteRole, and not scoped to any single site. Creates and edits Sites and Bathrooms, issues/replaces QRTokens, sets and manages the fixed price (price versions), invites the _initial_ Manager for a new Site, and triggers payment capture/cancel (internal backend). Does **not** request cleanings and does **not** authorize card holds. |
-| **Manager**                   | Site-scoped (SiteRole `role=manager`). Requests cleaning and authorizes fixed-price holds at their site, approves assistant one-time requests, invites/promotes/revokes assistants at their site, views full payment details for their site, and may replace the QR at their own site. **Cannot** create Sites or Bathrooms and **cannot** capture or cancel payments — those are Company Admin actions.                  |
-| **Assistant**                 | Site staff invited by a manager. Has a SiteRole with status `pending` or `authorized`. Can initiate cleaning requests within their authorized limits once `authorized`; while `pending`, can only initiate a request that requires a manager's one-time approval.                                                                                                                                                         |
-| **Customer / public visitor** | Anyone who scans a bathroom QR and has no SiteRole for that site — whether unauthenticated or authenticated via Cognito. Sees only the neutral public page; can optionally leave a non-billable alert.                                                                                                                                                                                                                    |
+| Actor                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Company Admin**             | Platform-level internal operator (`platform_role=company_admin`) — **not** a SiteRole, and not scoped to any single site. Creates and edits Sites and Bathrooms, issues/replaces QRTokens, sets and manages the fixed price (price versions), invites the _initial_ Manager for a new Site, and triggers payment capture/cancel (internal backend). Does **not** request cleanings and does **not** authorize card holds.            |
+| **Manager**                   | Site-scoped (SiteRole `role=manager`). Requests cleaning and authorizes fixed-price holds at their site, approves assistant one-time requests, invites/promotes/revokes assistants **and additional managers** at their site, views full payment details for their site, and may replace the QR at their own site. **Cannot** create Sites or Bathrooms and **cannot** capture or cancel payments — those are Company Admin actions. |
+| **Assistant**                 | Site staff invited by a manager. Has a SiteRole with status `pending` or `authorized`. Can initiate cleaning requests within their authorized limits once `authorized`; while `pending`, can only initiate a request that requires a manager's one-time approval.                                                                                                                                                                    |
+| **Customer / public visitor** | Anyone who scans a bathroom QR and has no SiteRole for that site — whether unauthenticated or authenticated via Cognito. Sees only the neutral public page; can optionally leave a non-billable alert.                                                                                                                                                                                                                               |
 
 No other roles exist in the MVP. There is no customer account tier.
 
@@ -225,6 +228,33 @@ The Phase 0 vertical slice realizes the flows above with these routes; all autho
 All onboarding `POST`s are state-changing and therefore require the existing session-bound CSRF token (§ CSRF guard); the Company Admin console submits them via a small progressive-enhancement ES module that echoes the token in the `x-csrf-token` header. The public scan page loads no such requirement and ships ~0 KB JS.
 
 > **Deferred in this slice — public `PublicAlert` affordance.** The neutral page does not yet expose an interactive "notify staff" submission. The global CSRF guard requires an authenticated session for every state-changing request, and an anonymous state-changing endpoint would be a spam/CSRF surface (hardened rate limiting and duplicate protection are out of scope for MVP per §1.5). The `PublicAlert` entity and the non-billable alert flow remain specified (§4, §11.2) and will be added behind an appropriate anti-abuse control in a later phase; deferring it keeps complete mediation intact rather than shipping a weaker anonymous mutation.
+
+### 11.4 Phase 1 HTTP surface — Site Manager invitation flow (implementation)
+
+This slice generalizes the Company Admin's initial-manager invite (§11.1, §11.3) so an
+authorized Site Manager can invite additional members — another manager or an assistant —
+to their own site. It reuses the `invite_site_role` action / `site_role:invite` capability
+that the matrix (§7) already grants to an authorized `role=manager` SiteRole at its own
+site; Company Admin authority (`invite_initial_manager`) is unchanged and orthogonal.
+
+- `GET /manager` — Site Manager console. Requires an authenticated session; lists every
+  Site where the caller holds an `authorized` `role=manager` SiteRole, each with its
+  pending invites and an invite form. This is a self-scoped read (filtered by the caller's
+  own `user_id`), so an authenticated customer or assistant simply sees an empty console —
+  never another manager's sites.
+- `POST /manager/sites/:siteId/invites` — invite a user by phone as `manager` or
+  `assistant` at `:siteId`, creating a pending SiteRole (`user_id=null`, `status=pending`;
+  gated on `site_role:invite`, scoped to `:siteId`). A repeat invite for the same
+  not-yet-linked phone at the same site is idempotent (returns the existing pending/
+  authorized record rather than a duplicate row). Rate-limited per authenticated user
+  (same fixed-window primitive as §11.3's public scan limiter) since no SMS cost bounds
+  invite volume in this phase. **This phase persists a DB record only — no SMS/OTP is
+  sent.** Delivery and the invite-bridge link to a Cognito identity on first login (§3.3)
+  are separate, later tasks.
+
+The invite `POST` is state-changing and therefore requires the same session-bound CSRF
+token as the Company Admin console (§11.3); the manager console submits it via the same
+progressive-enhancement pattern (`x-csrf-token` header), inert without JS.
 
 ## 12. Security invariants
 
