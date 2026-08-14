@@ -164,6 +164,54 @@ All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Pa
 - Passkey enrollment is an **identity** action, not an authority action. Per §3, enrolling a passkey confirms who you are and grants zero site authority. Access is therefore gated solely by holding a valid session; it is deliberately **not** routed through the deny-by-default capability matrix (§7), which governs site/platform authority and would wrongly deny an ordinary authenticated user with no `SiteRole`. No role is branched on — every authenticated identity may enroll a passkey for itself.
 - Testing mocks Cognito end-to-end exactly as §6.1: the enrollment route is driven with an injected session and the shared callback is exercised with a locally-signed ID token and a stubbed token endpoint, so the suite runs in CI with no external credentials and no live WebAuthn ceremony.
 
+### 6.3 Demo invitation-code activation (DEMO_MODE)
+
+This path exists **only** to let the full invite → accept → activation loop (§3.3) be
+walked in a browser during demos and local development, without live SMS delivery or a
+Cognito user pool. It is gated end-to-end behind a single `DEMO_MODE` environment flag
+and is **inert in production**, where the flag is unset. Production activation remains
+phone-verified via SMS OTP (§6.1) plus the §3.3 bridge; this path neither alters nor
+weakens that production flow.
+
+- **Gating.** When `DEMO_MODE` is off (the production default): no invite code is
+  generated or displayed, and the accept routes are **not registered at all** — a request
+  to `/invite/accept` is an ordinary `404`. Every demo behaviour below is reachable only
+  when the flag is on, so the production build carries the code but never exposes it.
+- **Code minting & display.** When an authorized Site Manager creates an invite (§11.4)
+  in `DEMO_MODE`, the server mints a **single-use** code tied to that specific pending
+  SiteRole and persists it (`demo_invite_codes`, one usable row per pending invite;
+  repeat invites reuse the still-unused code rather than minting duplicates). The Site
+  Manager console then displays the code alongside a copyable `GET /invite/accept?code=…`
+  link for that invite. The code binds a demo accept to one pending SiteRole; it confers
+  no authority by itself.
+- **Accept URL.** `GET /invite/accept` renders a form (the invited person types or
+  arrives with a prefilled code) and mints a short-lived, origin-bound double-submit CSRF
+  token into an HttpOnly `rs_demo_csrf` cookie plus a matching hidden form field. Because
+  the accepter has no session yet, this pre-session `POST` is deliberately exempt from the
+  session-bound CSRF gate (§11.3) — an exemption that is itself `DEMO_MODE`-gated and
+  inert in production — and is protected instead by the double-submit token compared in
+  constant time. `POST /invite/accept` validates that token, then validates the code.
+- **One-step session + activation (reuses §3.3 unchanged).** On a valid, unused code the
+  server claims it (marks it used in the same conditional write, so a concurrent or later
+  reuse claims nothing) and then **stands in for SMS-OTP verification of the invited
+  phone**: it resolves a deterministic demo identity whose _verified_ phone equals the
+  invite's `invited_phone` (`findOrCreateUserByCognitoSub`, §6.1's persistence contract),
+  then runs the **existing `bridgePendingSiteRoles` (§3.3) verbatim**. There is no parallel
+  activation code path: the outcome is therefore identical to production — a `manager`
+  invite is activated (`status → authorized`, the Site becomes operable per §11.1) while an
+  `assistant` invite is only linked (`status` stays `pending`, no self-elevation until a
+  manager promotes it, §9/§10). The server then issues the same signed session cookie the
+  Cognito callback issues (§6.1), so the accepter continues authenticated as that verified
+  identity, and renders a result page reflecting the outcome.
+- **Single-use.** The code is marked used at claim time; a second submission of the same
+  code (or an unknown code) is rejected with no session minted and no bridge run. All
+  authority is still re-derived from the SiteRole matrix (§7) on every subsequent request
+  — the demo accept grants authority only because the reused §3.3 bridge set the resolved
+  role to `authorized`, never through any bespoke elevation.
+
+Testing mocks everything: codes and acceptance are exercised against the in-process PGlite
+database with no AWS, no Cognito, and no real SMS.
+
 ## 7. Authorization
 
 - **Deny-by-default, capability matrix.** Every state-changing endpoint is gated by an explicit capability matrix keyed by `(platform_role, SiteRole.role, SiteRole.status)`, scoped to the target Site (and `bathroom_scope` where applicable). A request is denied unless the matrix names an explicit allow for its endpoint given the caller's platform role and, where relevant, their SiteRole at the target Site.
@@ -329,6 +377,19 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #002 — 2026-08-14T16:56:54-04:00
+
+Adds §6.3 Demo invitation-code activation (DEMO_MODE): a `DEMO_MODE`-gated path that lets
+the full invite → accept → activation loop (§3.3) be walked in a browser without live SMS
+or Cognito. In demo mode, creating a Site Manager invite (§11.4) mints and displays a
+single-use code tied to the pending SiteRole; `GET/POST /invite/accept` validate the code
+(behind an origin-bound double-submit CSRF token, since the accepter has no session yet),
+stand in for SMS-OTP verification of the invited phone, and run the existing
+`bridgePendingSiteRoles` bridge **unchanged** (manager → authorized, assistant → linked
+but pending). The flow is inert in production — the flag is unset, no code is shown, and
+the accept routes are not registered (404). No parallel activation path is introduced and
+the deny-by-default matrix (§7) is unchanged.
 
 ### #001 — 2026-08-14T16:41:28-04:00
 
