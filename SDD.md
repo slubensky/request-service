@@ -46,11 +46,11 @@ Any of the above may become in-scope in a later phase, but each requires a spec 
 
 ## 2. Actors & roles
 
-| Actor | Description |
-| --- | --- |
-| **Manager** | Owns or administers a Site. Creates SiteRoles (invites assistants), sets `max_authorization_cents`, approves assistant one-time requests, replaces/revokes QR tags. |
-| **Assistant** | Site staff invited by a manager. Has a SiteRole with status `pending` or `authorized`. Can initiate cleaning requests within their authorized limits once `authorized`; while `pending`, can only initiate a request that requires a manager's one-time approval. |
-| **Customer / public visitor** | Anyone who scans a bathroom QR and has no SiteRole for that site — whether unauthenticated or authenticated via Cognito. Sees only the neutral public page; can optionally leave a non-billable alert. |
+| Actor                         | Description                                                                                                                                                                                                                                                       |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Manager**                   | Owns or administers a Site. Creates SiteRoles (invites assistants), sets `max_authorization_cents`, approves assistant one-time requests, replaces/revokes QR tags.                                                                                               |
+| **Assistant**                 | Site staff invited by a manager. Has a SiteRole with status `pending` or `authorized`. Can initiate cleaning requests within their authorized limits once `authorized`; while `pending`, can only initiate a request that requires a manager's one-time approval. |
+| **Customer / public visitor** | Anyone who scans a bathroom QR and has no SiteRole for that site — whether unauthenticated or authenticated via Cognito. Sees only the neutral public page; can optionally leave a non-billable alert.                                                            |
 
 No other roles exist in the MVP. There is no "admin" role distinct from manager, and no customer account tier.
 
@@ -58,8 +58,8 @@ No other roles exist in the MVP. There is no "admin" role distinct from manager,
 
 This is the central security invariant of the system: **the system never decides authority from anything the person presents.**
 
-- **Authentication** (Amazon Cognito) proves *who you are* — a verified phone number or a registered passkey bound to a Cognito subject (`cognito_sub`).
-- **Authorization** (a manager-created `SiteRole`) proves *what you may do at a site*.
+- **Authentication** (Amazon Cognito) proves _who you are_ — a verified phone number or a registered passkey bound to a Cognito subject (`cognito_sub`).
+- **Authorization** (a manager-created `SiteRole`) proves _what you may do at a site_.
 
 These are deliberately separate systems, and the second never follows automatically from the first.
 
@@ -73,12 +73,12 @@ There is **no self-service path** from customer to assistant:
 
 ### 3.2 Resolution table
 
-| Who | What the server finds | Can start a paid request? |
-| --- | --- | --- |
-| Customer / public visitor | Authenticated (or anonymous) identity with **no SiteRole** for this site | No — neutral "see staff" page; optional non-billable alert |
+| Who                                   | What the server finds                                                                      | Can start a paid request?                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| Customer / public visitor             | Authenticated (or anonymous) identity with **no SiteRole** for this site                   | No — neutral "see staff" page; optional non-billable alert                               |
 | Invited assistant, not yet authorized | **Pending** SiteRole (`role=assistant, status=pending`) created by a manager inviting them | No self-authorize — can only initiate a request that needs a manager's one-time approval |
-| Authorized assistant | `role=assistant, status=authorized` | Yes, within limits (`max_authorization_cents`) |
-| Manager | `role=manager`, active, with `max_authorization_cents` | Yes, up to the authorized amount |
+| Authorized assistant                  | `role=assistant, status=authorized`                                                        | Yes, within limits (`max_authorization_cents`)                                           |
+| Manager                               | `role=manager`, active, with `max_authorization_cents`                                     | Yes, up to the authorized amount                                                         |
 
 ### 3.3 The bridge: invite → pending → linked
 
@@ -93,17 +93,17 @@ This bridge is the only route by which a SiteRole comes to exist for a given ide
 
 All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Payment fields are references only — the system never stores raw card data. Identity is anchored to a Cognito subject, never to a password.
 
-| Entity | Key fields | Notes |
-| --- | --- | --- |
-| **Site** | `name`, `address`, `timezone`, `currency`, `fixed_price_cents`, `terms` | One billing configuration; owns Bathrooms. |
-| **Bathroom** | `site_id`, `label`, `status` | Belongs to exactly one Site; at most one active QRToken. |
-| **QRToken** | `bathroom_id`, `token_hash`, `status` | Stores a one-way hash of the token only; opaque and non-authorizing; replaceable/revocable. |
-| **User** | `cognito_sub`, `phone`, `status` | Identity anchored to a Cognito subject; no passwords stored. |
-| **SiteRole** | `user_id`, `site_id`, `role`, `status`, `max_authorization_cents`, `bathroom_scope` | Manager-created site authority; deny by default; distinguishes assistant from customer. `role` ∈ {manager, assistant}; `status` ∈ {pending, authorized, revoked}. |
-| **CleaningRequest** | `bathroom_id`, `price_version`, `amount_cents`, `status` | Exactly one payment authorization per request in the MVP. |
-| **PaymentAuthorization** | `request_id`, `stripe_payment_intent_id`, `status` | Manual-capture; created fresh per request; never reused. |
-| **AssistantApprovalRequest** | `site_id`, `bathroom_id`, `price_version`, `amount`, `assistant_id`, `expires_at` | Single-use; 5–15 minute expiry; bound values invalidate the approval on change. |
-| **PublicAlert** | `bathroom_id`, `note`, `created_at` | Non-billable; no associated PaymentIntent or CleaningRequest. |
+| Entity                       | Key fields                                                                          | Notes                                                                                                                                                             |
+| ---------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Site**                     | `name`, `address`, `timezone`, `currency`, `fixed_price_cents`, `terms`             | One billing configuration; owns Bathrooms.                                                                                                                        |
+| **Bathroom**                 | `site_id`, `label`, `status`                                                        | Belongs to exactly one Site; at most one active QRToken.                                                                                                          |
+| **QRToken**                  | `bathroom_id`, `token_hash`, `status`                                               | Stores a one-way hash of the token only; opaque and non-authorizing; replaceable/revocable.                                                                       |
+| **User**                     | `cognito_sub`, `phone`, `status`                                                    | Identity anchored to a Cognito subject; no passwords stored.                                                                                                      |
+| **SiteRole**                 | `user_id`, `site_id`, `role`, `status`, `max_authorization_cents`, `bathroom_scope` | Manager-created site authority; deny by default; distinguishes assistant from customer. `role` ∈ {manager, assistant}; `status` ∈ {pending, authorized, revoked}. |
+| **CleaningRequest**          | `bathroom_id`, `price_version`, `amount_cents`, `status`                            | Exactly one payment authorization per request in the MVP.                                                                                                         |
+| **PaymentAuthorization**     | `request_id`, `stripe_payment_intent_id`, `status`                                  | Manual-capture; created fresh per request; never reused.                                                                                                          |
+| **AssistantApprovalRequest** | `site_id`, `bathroom_id`, `price_version`, `amount`, `assistant_id`, `expires_at`   | Single-use; 5–15 minute expiry; bound values invalidate the approval on change.                                                                                   |
+| **PublicAlert**              | `bathroom_id`, `note`, `created_at`                                                 | Non-billable; no associated PaymentIntent or CleaningRequest.                                                                                                     |
 
 ### 4.1 Referential notes
 
@@ -177,16 +177,16 @@ An assistant with a **pending** SiteRole cannot self-authorize a paid request. I
 
 ## 12. Security invariants
 
-| Invariant | Statement |
-| --- | --- |
-| Identity ≠ authority | Cognito authentication proves who a user is; only a manager-created SiteRole grants site authority. No self-service path elevates a customer to an assistant. |
-| Authorize by site | Every state-changing endpoint validates that an active user holds the required SiteRole permission. Deny by default; never trust UI, QR contents, or client claims. |
-| Fresh hold each time | Every paid request creates a new PaymentIntent. A prior hold is never reused for another bathroom or request. |
-| No raw card data | Card entry happens only in Stripe's UI. The system stores Stripe IDs and never logs card data or client secrets. |
-| Opaque, hashed QR | Random, non-sequential tokens; only a one-way hash is stored; resolution is rate-limited; tags are revocable/replaceable. |
-| One-time approval binding | Assistant approval is single-use and bound to site, bathroom, price version, amount, and assistant; changing any bound value invalidates it. |
-| Verified webhooks | Stripe webhooks are signature-verified and processed idempotently to update payment status. |
-| Managed secrets | Stripe keys and Cognito/DB credentials live in AWS Secrets Manager; never hardcoded, never in logs or diffs. |
+| Invariant                 | Statement                                                                                                                                                           |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity ≠ authority      | Cognito authentication proves who a user is; only a manager-created SiteRole grants site authority. No self-service path elevates a customer to an assistant.       |
+| Authorize by site         | Every state-changing endpoint validates that an active user holds the required SiteRole permission. Deny by default; never trust UI, QR contents, or client claims. |
+| Fresh hold each time      | Every paid request creates a new PaymentIntent. A prior hold is never reused for another bathroom or request.                                                       |
+| No raw card data          | Card entry happens only in Stripe's UI. The system stores Stripe IDs and never logs card data or client secrets.                                                    |
+| Opaque, hashed QR         | Random, non-sequential tokens; only a one-way hash is stored; resolution is rate-limited; tags are revocable/replaceable.                                           |
+| One-time approval binding | Assistant approval is single-use and bound to site, bathroom, price version, amount, and assistant; changing any bound value invalidates it.                        |
+| Verified webhooks         | Stripe webhooks are signature-verified and processed idempotently to update payment status.                                                                         |
+| Managed secrets           | Stripe keys and Cognito/DB credentials live in AWS Secrets Manager; never hardcoded, never in logs or diffs.                                                        |
 
 ## 13. Confirmed stack decisions
 
@@ -202,4 +202,3 @@ These decisions are locked pending final sign-off on the Blueprint (`art_RUHUe0P
 - **Delivery:** build and host in the sandbox first; PR into `main` and AWS deploy only after human review, per the Blueprint's sandbox-first build plan.
 
 Each new dependency (Drizzle, Stripe SDK, `qrcode`, AWS SDK) and each managed service (Cognito, RDS/Aurora, App Runner) is justified above and in ARCHITECTURE.md before adoption, per AGENTS.md's minimal-dependency rule.
-

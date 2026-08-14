@@ -15,17 +15,17 @@ This satisfies two constraints that are both binding, not optional:
 
 ## 2. Stack & module map
 
-| Layer | Choice | Notes |
-| --- | --- | --- |
-| **Server** | TypeScript on Node.js LTS, no bundler. Native `node:http` + a small hand-written typed router. | No Express, no Fastify, no Next.js, no other server framework. |
-| **UI (server-rendered)** | Server-rendered HTML via template literals. | No JSX, no server-side templating framework (e.g. EJS/Handlebars) beyond plain template literals with explicit escaping. |
-| **UI (client)** | Progressive-enhancement vanilla ES modules (`<script type="module">`), loaded directly by the browser. Islands only where needed (e.g. Stripe Payment Element mount, passkey WebAuthn calls). | No bundler (no webpack/vite/esbuild bundling step for shipped code). No React/Vue/etc. |
-| **Styling** | Hand-authored, mobile-first CSS with design tokens (CSS custom properties). | No CSS framework (no Tailwind, no Bootstrap). |
-| **Data** | Amazon RDS / Aurora Serverless v2 **PostgreSQL**, accessed through **Drizzle ORM**. | Drizzle is a typed query builder/migration library, not a framework — it does not dictate application structure or routing. Typed, parameterized queries only (AGENTS.md: "Use parameterized queries and safe APIs for database access"). |
-| **Auth** | **Amazon Cognito** managed passwordless: SMS OTP + WebAuthn passkeys, via **Cognito managed login (Hosted UI)**. | Cognito owns *authentication*. The application server owns *authorization* (SiteRole) — see SDD.md §3 and §7. Hosted UI is chosen over a custom SSR auth UI for lowest implementation cost; see §6 for the tradeoff. |
-| **Payments** | Stripe Node SDK, server-side only, plus the Payment Element loaded from Stripe's CDN client-side. | Manual-capture PaymentIntents, signed/verified webhooks, idempotency keys on every creation call. See SDD.md §9. |
-| **Deploy** | **Terraform** provisions AWS App Runner (managed SSR container), RDS/Aurora Serverless v2, Cognito, Secrets Manager, ACM + Route 53. Region: `us-east-1`. | Infrastructure as code; `terraform validate` runs in CI on every change. |
-| **QR / tests / CI** | `qrcode` (server-side generation library), `node:test` (built-in test runner), CI runs lint · test · build · `terraform validate`. | `qrcode` is a small, single-purpose library, not a framework. |
+| Layer                    | Choice                                                                                                                                                                                        | Notes                                                                                                                                                                                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Server**               | TypeScript on Node.js LTS, no bundler. Native `node:http` + a small hand-written typed router.                                                                                                | No Express, no Fastify, no Next.js, no other server framework.                                                                                                                                                                            |
+| **UI (server-rendered)** | Server-rendered HTML via template literals.                                                                                                                                                   | No JSX, no server-side templating framework (e.g. EJS/Handlebars) beyond plain template literals with explicit escaping.                                                                                                                  |
+| **UI (client)**          | Progressive-enhancement vanilla ES modules (`<script type="module">`), loaded directly by the browser. Islands only where needed (e.g. Stripe Payment Element mount, passkey WebAuthn calls). | No bundler (no webpack/vite/esbuild bundling step for shipped code). No React/Vue/etc.                                                                                                                                                    |
+| **Styling**              | Hand-authored, mobile-first CSS with design tokens (CSS custom properties).                                                                                                                   | No CSS framework (no Tailwind, no Bootstrap).                                                                                                                                                                                             |
+| **Data**                 | Amazon RDS / Aurora Serverless v2 **PostgreSQL**, accessed through **Drizzle ORM**.                                                                                                           | Drizzle is a typed query builder/migration library, not a framework — it does not dictate application structure or routing. Typed, parameterized queries only (AGENTS.md: "Use parameterized queries and safe APIs for database access"). |
+| **Auth**                 | **Amazon Cognito** managed passwordless: SMS OTP + WebAuthn passkeys, via **Cognito managed login (Hosted UI)**.                                                                              | Cognito owns _authentication_. The application server owns _authorization_ (SiteRole) — see SDD.md §3 and §7. Hosted UI is chosen over a custom SSR auth UI for lowest implementation cost; see §6 for the tradeoff.                      |
+| **Payments**             | Stripe Node SDK, server-side only, plus the Payment Element loaded from Stripe's CDN client-side.                                                                                             | Manual-capture PaymentIntents, signed/verified webhooks, idempotency keys on every creation call. See SDD.md §9.                                                                                                                          |
+| **Deploy**               | **Terraform** provisions AWS App Runner (managed SSR container), RDS/Aurora Serverless v2, Cognito, Secrets Manager, ACM + Route 53. Region: `us-east-1`.                                     | Infrastructure as code; `terraform validate` runs in CI on every change.                                                                                                                                                                  |
+| **QR / tests / CI**      | `qrcode` (server-side generation library), `node:test` (built-in test runner), CI runs lint · test · build · `terraform validate`.                                                            | `qrcode` is a small, single-purpose library, not a framework.                                                                                                                                                                             |
 
 ### 2.1 What "no framework, no bundler" means in practice
 
@@ -51,16 +51,16 @@ The **server is the single authorization point**. Cognito handles authentication
 
 These replace the AGENTS.md "Performance targets" section (see the corresponding AGENTS.md edit in this same change) with numbers appropriate to a server-rendered mobile web app, rather than the prior LLM-app-specific targets.
 
-| Metric | Target | Condition |
-| --- | --- | --- |
-| FCP (First Contentful Paint) | < 1.5s | mid-tier mobile, 4G |
-| LCP (Largest Contentful Paint) | < 2.5s | mid-tier mobile, 4G |
-| INP (Interaction to Next Paint) | < 200ms | interaction responsiveness |
-| CLS (Cumulative Layout Shift) | < 0.1 | layout stability |
-| TTFB (SSR) | < 200ms p95 | server response |
-| Client JS budget | < 50KB gzipped (public visitor page ~0KB) | direct benefit of the no-framework/no-bundler decision |
-| Concurrency | 50 concurrent users | MVP; single process, scale horizontally if needed |
-| HTTPS | Required in production | terminated via ACM at App Runner / Route 53 |
+| Metric                          | Target                                    | Condition                                              |
+| ------------------------------- | ----------------------------------------- | ------------------------------------------------------ |
+| FCP (First Contentful Paint)    | < 1.5s                                    | mid-tier mobile, 4G                                    |
+| LCP (Largest Contentful Paint)  | < 2.5s                                    | mid-tier mobile, 4G                                    |
+| INP (Interaction to Next Paint) | < 200ms                                   | interaction responsiveness                             |
+| CLS (Cumulative Layout Shift)   | < 0.1                                     | layout stability                                       |
+| TTFB (SSR)                      | < 200ms p95                               | server response                                        |
+| Client JS budget                | < 50KB gzipped (public visitor page ~0KB) | direct benefit of the no-framework/no-bundler decision |
+| Concurrency                     | 50 concurrent users                       | MVP; single process, scale horizontally if needed      |
+| HTTPS                           | Required in production                    | terminated via ACM at App Runner / Route 53            |
 
 The near-zero client JS on the public visitor page is a direct, measurable consequence of §2's decision: that page ships no framework runtime and no bundled dependency graph, only the minimal HTML/CSS needed for the neutral "notify staff" experience (SDD.md §11).
 
@@ -82,4 +82,3 @@ These are documented as assumptions per AGENTS.md's spec policy ("If the request
 ## 8. Relationship to the build plan
 
 This architecture is built incrementally per the Blueprint's sandbox-first build plan: the application is built and hosted in the sandbox against local Postgres, and the Terraform in `infra/` is authored and `terraform validate`-checked in CI, but no AWS deploy happens until a human explicitly approves it. This document and SDD.md are both authored in Phase 0 ("Record SDD.md ... record ARCHITECTURE.md") ahead of any application scaffolding.
-
