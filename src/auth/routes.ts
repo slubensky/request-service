@@ -20,6 +20,7 @@ import {
   buildAuthorizeUrl,
   buildLogoutUrl,
   exchangeCodeForTokens,
+  verifiedPhoneNumber,
   verifyIdToken,
 } from './cognito.js';
 import { clearCookie, parseCookies, serializeCookie } from './cookies.js';
@@ -85,10 +86,12 @@ async function handleCallback(runtime: AuthRuntime, ctx: RouteContext): Promise<
       runtime.cognito,
       runtime.jwksFor(runtime.cognito),
     );
+    // Persist the phone only when the SMS OTP sign-in verified it; an
+    // unverified number is never trusted as contact identity (SDD §6).
     const user = await findOrCreateUserByCognitoSub(
       runtime.connection.db,
       identity.sub,
-      identity.phoneNumber,
+      verifiedPhoneNumber(identity),
     );
     const token = signSession({ userId: user.id, sub: identity.sub }, runtime.sessionSecret);
     const sessionCookie = serializeCookie(SESSION_COOKIE, token, {

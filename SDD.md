@@ -4,6 +4,8 @@
 
 > **Last edited:** 2026-08-14 15:00 UTC — Phase 0 vertical slice: documented the concrete HTTP surface for Company Admin onboarding (§11.1) and the privacy-safe public scan endpoint (§11.2), and recorded that the optional public `PublicAlert` affordance is intentionally deferred for this slice (see §11.3). No role-model or data-model change; the slice reuses the merged schema and the deny-by-default capability matrix (§7) unchanged. Per AGENTS.md spec policy, edit date/time recorded here.
 >
+> **Last edited:** 2026-08-14 18:57 UTC — Phase 1 (Task 16): documented the **SMS OTP activation path** (new §6.1). Records the choice-based passwordless Cognito configuration (SMS_OTP first-auth factor, SNS delivery, auto-verified `phone_number`; `terraform validate`-only, no live apply), the single Hosted UI login entry point and factor-shared `/auth/callback`, and the rule that the server persists a `User.phone` only when the ID token reports it verified (`phone_number_verified`). No role-model or data-model change; reserves §6.2 for the following passkey/WebAuthn task. Per AGENTS.md spec policy, edit date/time recorded here.
+>
 > **Status:** Approved for Phase 0 build. Source of truth for coders; mirrors the reviewed Blueprint (`art_RUHUe0PF`, v0.3).
 
 ## 1. Purpose & scope
@@ -134,6 +136,14 @@ All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Pa
 - Cognito owns authentication end-to-end (OTP delivery/verification, passkey registration/assertion, session/token issuance). The application server never handles raw credentials.
 - Successful Cognito authentication yields a `cognito_sub` used to look up (or create) the corresponding `User` row. It confirms identity only — see §3 for the strict separation from authorization.
 - Cognito managed login (Hosted UI) is the assumed default for lowest implementation cost; see ARCHITECTURE.md for the stack decision.
+
+### 6.1 SMS OTP activation path
+
+- The user pool is configured for **choice-based passwordless** sign-in with `SMS_OTP` (and `WEB_AUTHN`, reserved for §6.2) as allowed first-auth factors; phone-number delivery is via SNS, and `phone_number` is an auto-verified attribute (`infra/modules/cognito`). This is authored in Terraform and validated in CI (`terraform validate`); no live AWS apply is in scope, and the application never sends SMS itself — delivery is Cognito's responsibility.
+- The single Hosted UI login entry point (`GET /auth/login`) redirects to the managed login authorize endpoint requesting the `openid phone` scopes. Cognito presents the pool's allowed factors, so SMS OTP is offered without the application selecting a factor; the same entry point will surface passkeys once §6.2 lands.
+- On success Cognito redirects to `GET /auth/callback`, which is **shared unchanged across all factors**: it validates the single-use `state`, exchanges the code, verifies the ID token via the pool JWKS (issuer, audience, `token_use=id`, signature), maps the subject to a `User`, and issues the signed session cookie. SMS OTP introduces no separate callback or session path.
+- An SMS OTP sign-in verifies possession of the phone, so the ID token carries `phone_number_verified: true`. The server persists the `phone` on the `User` **only when it is verified**; an unverified value is discarded and never trusted as contact identity. This verified phone is the key later used to link a phone-addressed **pending SiteRole** invite to the authenticated identity (§4, §7 activation).
+- Testing mocks Cognito end-to-end: the JWKS is injected locally and the token endpoint is stubbed (as in the PR #6/#7 auth tests), so the suite runs in CI with no external credentials and no real SMS.
 
 ## 7. Authorization
 

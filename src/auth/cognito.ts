@@ -26,6 +26,13 @@ export interface CognitoConfig {
 export interface CognitoIdentity {
   sub: string;
   phoneNumber: string | null;
+  /**
+   * Whether Cognito reports the phone number as verified. An SMS OTP sign-in
+   * proves possession of the number, so the ID token carries
+   * `phone_number_verified: true`; passkey-only sign-ins carry no verified
+   * phone (see SDD §6).
+   */
+  phoneNumberVerified: boolean;
 }
 
 interface TokenResponse {
@@ -51,7 +58,14 @@ export function loadCognitoConfig(): CognitoConfig | null {
   return { domain, issuer, clientId, clientSecret, redirectUri, logoutRedirectUri };
 }
 
-/** Builds the Hosted UI authorize URL. `state` and `nonce` are caller-generated, single-use. */
+/**
+ * Builds the Hosted UI authorize URL. Cognito's managed login presents the
+ * pool's allowed first-auth factors (SMS OTP + passkeys; see
+ * infra/modules/cognito) so this single entry point drives passwordless
+ * sign-in without the app choosing a factor. The `phone` scope is requested so
+ * an SMS OTP sign-in returns the verified `phone_number` claim we persist as
+ * contact identity. `state` and `nonce` are caller-generated, single-use.
+ */
 export function buildAuthorizeUrl(config: CognitoConfig, state: string, nonce: string): string {
   const params = new URLSearchParams({
     response_type: 'code',
@@ -142,5 +156,30 @@ export async function verifyIdToken(
     throw new Error('Cognito ID token missing sub');
   }
   const phoneNumber = typeof payload.phone_number === 'string' ? payload.phone_number : null;
-  return { sub: payload.sub, phoneNumber };
+  return {
+    sub: payload.sub,
+    phoneNumber,
+    phoneNumberVerified: isVerifiedClaim(payload.phone_number_verified),
+  };
+}
+
+/**
+ * Cognito emits `phone_number_verified` as a JSON boolean, but some token
+ * shapes stringify it. Treat only an explicit true / "true" as verified;
+ * anything else fails closed to unverified.
+ */
+function isVerifiedClaim(value: unknown): boolean {
+  return value === true || value === 'true';
+}
+
+/**
+ * The identity's phone number, but only when Cognito reports it verified. An
+ * SMS OTP sign-in verifies phone possession, so a verified number is safe to
+ * persist as contact identity and to match against phone-keyed pending invites
+ * (SDD §4). An unverified value is discarded (returns null) so we never trust
+ * an unproven phone; passkey-only sign-ins likewise yield null here, keeping
+ * that path additive.
+ */
+export function verifiedPhoneNumber(identity: CognitoIdentity): string | null {
+  return identity.phoneNumberVerified ? identity.phoneNumber : null;
 }
