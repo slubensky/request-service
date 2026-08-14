@@ -6,12 +6,15 @@ import { serveStaticFile } from './static.js';
 import { renderHomePage } from '../render/templates/home.js';
 import { getAuthRuntime } from '../auth/config.js';
 import { registerAuthRoutes } from '../auth/routes.js';
+import { registerAdminRoutes } from '../admin/routes.js';
+import { registerPublicRoutes } from '../public/routes.js';
 import { passesCsrf } from '../auth/guard.js';
+import type { AuthRuntime } from '../auth/config.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(currentDir, '../../public');
 
-function buildRouter(): Router {
+function buildRouter(runtime: AuthRuntime): Router {
   const router = new Router();
 
   router.get('/healthz', ({ res }) => {
@@ -24,7 +27,9 @@ function buildRouter(): Router {
     res.end(renderHomePage());
   });
 
-  registerAuthRoutes(router, getAuthRuntime());
+  registerAuthRoutes(router, runtime);
+  registerAdminRoutes(router, runtime);
+  registerPublicRoutes(router, runtime);
 
   return router;
 }
@@ -40,8 +45,8 @@ function parseUrl(req: IncomingMessage): URL {
  * app -- every response is produced here, nowhere else.
  */
 export function createApp(): (req: IncomingMessage, res: ServerResponse) => void {
-  const router = buildRouter();
   const runtime = getAuthRuntime();
+  const router = buildRouter(runtime);
 
   return (req, res) => {
     const method = req.method ?? 'GET';
