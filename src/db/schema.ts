@@ -26,6 +26,11 @@ import {
 export const bathroomStatus = pgEnum('bathroom_status', ['active', 'inactive']);
 export const qrTokenStatus = pgEnum('qr_token_status', ['active', 'revoked']);
 export const userStatus = pgEnum('user_status', ['active', 'disabled']);
+// Platform-level authority on the identity itself, independent of any SiteRole.
+// company_admin is an internal operator (cross-site); it is seeded/granted
+// internally and NEVER acquired via self-service, QR scan, or Cognito login.
+// Extensible: a new platform role is a new enum value + matrix entry.
+export const platformRoleName = pgEnum('platform_role', ['member', 'company_admin']);
 export const siteRoleName = pgEnum('site_role_name', ['manager', 'assistant']);
 export const siteRoleStatus = pgEnum('site_role_status', ['pending', 'authorized', 'revoked']);
 export const cleaningRequestStatus = pgEnum('cleaning_request_status', [
@@ -96,6 +101,7 @@ export const users = pgTable(
     cognitoSub: text('cognito_sub'),
     phone: text('phone'),
     status: userStatus('status').notNull().default('active'),
+    platformRole: platformRoleName('platform_role').notNull().default('member'),
     createdAt: createdAt(),
   },
   (table) => [uniqueIndex('users_cognito_sub_key').on(table.cognitoSub)],

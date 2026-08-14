@@ -8,7 +8,7 @@
  * the target site id -- never by a client-supplied role claim.
  */
 import { and, eq } from 'drizzle-orm';
-import type { ResolvedSiteRole } from '../auth/authorize.js';
+import type { PlatformRole, Principal, ResolvedSiteRole } from '../auth/authorize.js';
 import type { AppDatabase } from './client.js';
 import { siteRoles, users, type UserRow } from './schema.js';
 
@@ -45,6 +45,37 @@ export async function resolveSiteRole(
     maxAuthorizationCents: row.maxAuthorizationCents,
     bathroomScope: row.bathroomScope ?? null,
   };
+}
+
+/**
+ * Reads the user's platform_role. Defaults to `member` (least authority) when
+ * the row is absent, so a missing user can never resolve as a company_admin.
+ */
+export async function getPlatformRole(db: AppDatabase, userId: string): Promise<PlatformRole> {
+  const rows = await db
+    .select({ platformRole: users.platformRole })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return rows[0]?.platformRole ?? 'member';
+}
+
+/**
+ * Resolves the full authorization principal for a request: the platform_role
+ * (cross-site company_admin authority) and the SiteRole for the target site.
+ * Both are read from stored rows scoped to the authenticated user id -- never
+ * from a client claim -- then passed to the pure `authorize` core.
+ */
+export async function resolvePrincipal(
+  db: AppDatabase,
+  userId: string,
+  siteId: string,
+): Promise<Principal> {
+  const [platformRole, siteRole] = await Promise.all([
+    getPlatformRole(db, userId),
+    resolveSiteRole(db, userId, siteId),
+  ]);
+  return { platformRole, siteRole };
 }
 
 /**

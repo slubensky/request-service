@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { authorize } from '../src/auth/authorize.js';
-import { findOrCreateUserByCognitoSub, resolveSiteRole } from '../src/db/access.js';
+import {
+  findOrCreateUserByCognitoSub,
+  resolvePrincipal,
+  resolveSiteRole,
+} from '../src/db/access.js';
 import {
   bathrooms,
   cleaningRequests,
@@ -96,12 +100,10 @@ test('resolveSiteRole returns null for a user with no role (a customer)', async 
     assert.equal(role, null);
     // Deny-by-default: no role means the create action is refused.
     assert.equal(
-      authorize(role, {
-        type: 'create_cleaning_request',
-        siteId,
-        bathroomId: 'b',
-        amountCents: 100,
-      }).allowed,
+      authorize(
+        { platformRole: 'member', siteRole: role },
+        { type: 'create_cleaning_request', siteId, bathroomId: 'b', amountCents: 100 },
+      ).allowed,
       false,
     );
   } finally {
@@ -128,8 +130,10 @@ test('resolveSiteRole maps an authorized manager row, and authorize allows it', 
     assert.equal(role.role, 'manager');
     assert.equal(role.status, 'authorized');
     assert.equal(
-      authorize(role, { type: 'create_cleaning_request', siteId, bathroomId, amountCents: 4500 })
-        .allowed,
+      authorize(
+        { platformRole: 'member', siteRole: role },
+        { type: 'create_cleaning_request', siteId, bathroomId, amountCents: 4500 },
+      ).allowed,
       true,
     );
   } finally {
@@ -152,13 +156,63 @@ test('a pending assistant role is resolved and denied self-authorization', async
     });
     const role = await resolveSiteRole(db, user.id, siteId);
     assert.ok(role);
-    const decision = authorize(role, {
-      type: 'create_cleaning_request',
-      siteId,
-      bathroomId,
-      amountCents: 4500,
-    });
+    const decision = authorize(
+      { platformRole: 'member', siteRole: role },
+      { type: 'create_cleaning_request', siteId, bathroomId, amountCents: 4500 },
+    );
     assert.deepEqual(decision, { allowed: false, reason: 'requires_authorized_status' });
+  } finally {
+    await client.close();
+  }
+});
+
+test('resolvePrincipal grants a company_admin cross-site authority with no SiteRole', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, bathroomId } = await seedSite(db);
+    const [admin] = await db
+      .insert(users)
+      .values({ cognitoSub: 'sub-admin', platformRole: 'company_admin' })
+      .returning();
+    assert.ok(admin);
+
+    const principal = await resolvePrincipal(db, admin.id, siteId);
+    assert.equal(principal.platformRole, 'company_admin');
+    assert.equal(principal.siteRole, null);
+    // Platform authority: onboarding + capture, cross-site, without a SiteRole.
+    assert.equal(authorize(principal, { type: 'create_site' }).allowed, true);
+    assert.equal(authorize(principal, { type: 'capture_payment', siteId }).allowed, true);
+    assert.equal(
+      authorize(principal, { type: 'issue_qr_token', siteId, bathroomId }).allowed,
+      true,
+    );
+    // But a company_admin does not request cleanings (no SiteRole).
+    assert.deepEqual(
+      authorize(principal, {
+        type: 'create_cleaning_request',
+        siteId,
+        bathroomId,
+        amountCents: 100,
+      }),
+      { allowed: false, reason: 'no_site_role' },
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+test('resolvePrincipal defaults a plain user to platform member with no admin power', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId } = await seedSite(db);
+    const [user] = await db.insert(users).values({ cognitoSub: 'sub-plain' }).returning();
+    assert.ok(user);
+    const principal = await resolvePrincipal(db, user.id, siteId);
+    assert.equal(principal.platformRole, 'member');
+    assert.deepEqual(authorize(principal, { type: 'create_site' }), {
+      allowed: false,
+      reason: 'capability_not_granted',
+    });
   } finally {
     await client.close();
   }

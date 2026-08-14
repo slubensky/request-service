@@ -2,6 +2,7 @@ CREATE TYPE "public"."assistant_approval_status" AS ENUM('pending', 'granted', '
 CREATE TYPE "public"."bathroom_status" AS ENUM('active', 'inactive');--> statement-breakpoint
 CREATE TYPE "public"."cleaning_request_status" AS ENUM('authorizing', 'authorized', 'completed', 'canceled', 'expired');--> statement-breakpoint
 CREATE TYPE "public"."payment_authorization_status" AS ENUM('requires_capture', 'captured', 'canceled', 'expired');--> statement-breakpoint
+CREATE TYPE "public"."platform_role" AS ENUM('member', 'company_admin');--> statement-breakpoint
 CREATE TYPE "public"."qr_token_status" AS ENUM('active', 'revoked');--> statement-breakpoint
 CREATE TYPE "public"."site_role_name" AS ENUM('manager', 'assistant');--> statement-breakpoint
 CREATE TYPE "public"."site_role_status" AS ENUM('pending', 'authorized', 'revoked');--> statement-breakpoint
@@ -91,6 +92,7 @@ CREATE TABLE "users" (
 	"cognito_sub" text,
 	"phone" text,
 	"status" "user_status" DEFAULT 'active' NOT NULL,
+	"platform_role" "platform_role" DEFAULT 'member' NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint

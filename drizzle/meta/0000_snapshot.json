@@ -1,5 +1,5 @@
 {
-  "id": "49b1c252-2836-4f11-af97-3509cb44d3f2",
+  "id": "9cd76559-b3c0-488b-b6f7-3f492923cd52",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -749,6 +749,14 @@
           "notNull": true,
           "default": "'active'"
         },
+        "platform_role": {
+          "name": "platform_role",
+          "type": "platform_role",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'member'"
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -820,6 +828,14 @@
         "captured",
         "canceled",
         "expired"
+      ]
+    },
+    "public.platform_role": {
+      "name": "platform_role",
+      "schema": "public",
+      "values": [
+        "member",
+        "company_admin"
       ]
     },
     "public.qr_token_status": {
