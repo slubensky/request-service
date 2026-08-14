@@ -6,7 +6,6 @@
 >
 > **Last edited:** 2026-08-14 18:57 UTC — Phase 1 (Task 16): documented the **SMS OTP activation path** (new §6.1). Records the choice-based passwordless Cognito configuration (SMS_OTP first-auth factor, SNS delivery, auto-verified `phone_number`; `terraform validate`-only, no live apply), the single Hosted UI login entry point and factor-shared `/auth/callback`, and the rule that the server persists a `User.phone` only when the ID token reports it verified (`phone_number_verified`). No role-model or data-model change; reserves §6.2 for the following passkey/WebAuthn task. Per AGENTS.md spec policy, edit date/time recorded here.
 >
-> **Status:** Approved for Phase 0 build. Source of truth for coders; mirrors the reviewed Blueprint (`art_RUHUe0PF`, v0.3).
 > **Last edited:** 2026-08-14 18:00 UTC — Phase 1, Manager invitation flow: documented the HTTP surface (§11.4) an authorized Site Manager uses to invite additional members (manager or assistant) to their own site, generalizing the Company Admin's initial-manager invite. Clarified §2 that a Manager also invites/promotes/revokes additional managers, not only assistants. No new capability, role, or migration — this reuses the `invite_site_role` / `site_role:invite` matrix entry (§7) and the existing SiteRole schema (§4) unchanged. Per AGENTS.md spec policy, edit date/time recorded here.
 >
 > **Status:** Approved for Phase 0 build; Phase 1 manager invitation flow in review. Source of truth for coders; mirrors the reviewed Blueprint (`art_RUHUe0PF`, v0.3).
