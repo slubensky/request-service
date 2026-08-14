@@ -24,7 +24,7 @@ import {
   verifyIdToken,
 } from './cognito.js';
 import { clearCookie, parseCookies, serializeCookie } from './cookies.js';
-import { findOrCreateUserByCognitoSub } from '../db/access.js';
+import { bridgePendingSiteRoles, findOrCreateUserByCognitoSub } from '../db/access.js';
 import { signSession } from './session.js';
 
 export const SESSION_COOKIE = 'rs_session';
@@ -88,11 +88,16 @@ async function handleCallback(runtime: AuthRuntime, ctx: RouteContext): Promise<
     );
     // Persist the phone only when the SMS OTP sign-in verified it; an
     // unverified number is never trusted as contact identity (SDD §6).
+    const verifiedPhone = verifiedPhoneNumber(identity);
     const user = await findOrCreateUserByCognitoSub(
       runtime.connection.db,
       identity.sub,
-      verifiedPhoneNumber(identity),
+      verifiedPhone,
     );
+    // Invite bridge (SDD §3.3): link/activate any pending SiteRole invited by
+    // this VERIFIED phone. An unverified claim links nothing, and authority is
+    // still conferred only through the capability matrix.
+    await bridgePendingSiteRoles(runtime.connection.db, user.id, verifiedPhone);
     const token = signSession({ userId: user.id, sub: identity.sub }, runtime.sessionSecret);
     const sessionCookie = serializeCookie(SESSION_COOKIE, token, {
       httpOnly: true,

@@ -102,6 +102,13 @@ This bridge is the only route by which a SiteRole comes to exist for a given ide
 
 The same bridge bootstraps the very first Manager for a new Site: a **Company Admin** invites the initial Manager by identifier during onboarding, creating a pending `role=manager` SiteRole; when the invitee authenticates that identifier through Cognito, the server links it exactly as in steps 1–2 above. From that point forward, that Manager can invite/promote/revoke assistants at their own site — but only a Company Admin can create the next Site or invite the next Site's initial Manager.
 
+**Activation on authentication (updated 2026-08-14, 00:00 UTC).** Step 2's link is performed automatically in the authenticated Cognito callback (`src/auth/routes.ts` → `bridgePendingSiteRoles`, `src/db/access.ts`). On each successful authentication the server matches the ID token's **verified** phone number against not-yet-linked pending invites (`invited_phone` equal, `user_id IS NULL`, `status=pending`) and sets `user_id` to the resolved `User`. The two invited roles differ in outcome, matching the resolution table (§3.2):
+
+- A `role=manager` invite is **activated** in the same step (`status` → `authorized`), so the invitee becomes an active Manager and the Site becomes operable per §11.1.
+- A `role=assistant` invite is only **linked** (`status` stays `pending`); it confers no authority until a manager explicitly promotes it (§9/§10). Auto-authorizing an assistant on login would be self-elevation and is deliberately not done.
+
+A token whose verified identifier matches no pending invite links nothing and grants nothing — deny-by-default (§7) is unchanged, and Company Admin (`platform_role`) authority is orthogonal and untouched. The operation is **idempotent**: repeat authentication re-matches only still-unlinked pending invites, so an already-activated Manager role or an already-linked Assistant role is left exactly as it was. All authority continues to be re-derived from the SiteRole matrix (§7) on every request — activation grants authority only because the resolved role is now `authorized`, never through any parallel code path.
+
 ## 4. Data model
 
 All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Payment fields are references only — the system never stores raw card data. Identity is anchored to a Cognito subject, never to a password.

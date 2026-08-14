@@ -7,10 +7,10 @@
  * are parameterized through Drizzle and scoped by the authenticated user id and
  * the target site id -- never by a client-supplied role claim.
  */
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import type { PlatformRole, Principal, ResolvedSiteRole } from '../auth/authorize.js';
 import type { AppDatabase } from './client.js';
-import { siteRoles, users, type UserRow } from './schema.js';
+import { siteRoles, users, type SiteRoleRow, type UserRow } from './schema.js';
 
 /**
  * Resolves the authenticated user's authority at a site, or null when they
@@ -106,4 +106,61 @@ export async function findOrCreateUserByCognitoSub(
     throw new Error('Failed to upsert user for Cognito subject');
   }
   return row;
+}
+
+/**
+ * The invite bridge (SDD §3.3): links pending SiteRoles to a freshly
+ * authenticated identity by the token's **verified** phone number. Called from
+ * the Cognito callback after the User is resolved.
+ *
+ * Only not-yet-linked pending invites for `verifiedPhone` are touched
+ * (`invited_phone` equal, `user_id IS NULL`, `status=pending`) -- so the write
+ * is idempotent: a repeat authentication re-matches nothing already linked.
+ * Outcome is role-specific, mirroring the resolution table (§3.2):
+ *   - `manager` is activated (`status → authorized`) so the Site becomes
+ *     operable per §11.1 -- the invitee is now an active Manager.
+ *   - `assistant` is only linked (`status` stays `pending`); it confers no
+ *     authority until a manager promotes it (§9/§10). Auto-authorizing here
+ *     would be self-elevation.
+ *
+ * Grants no authority itself: every request still re-derives authority from the
+ * SiteRole matrix (authorize.ts), which denies any non-`authorized` role. A
+ * null/absent verified phone, or one matching no pending invite, links nothing.
+ */
+export async function bridgePendingSiteRoles(
+  db: AppDatabase,
+  userId: string,
+  verifiedPhone: string | null,
+): Promise<SiteRoleRow[]> {
+  if (!verifiedPhone) {
+    return [];
+  }
+
+  const activatedManagers = await db
+    .update(siteRoles)
+    .set({ userId, status: 'authorized' })
+    .where(
+      and(
+        eq(siteRoles.invitedPhone, verifiedPhone),
+        isNull(siteRoles.userId),
+        eq(siteRoles.status, 'pending'),
+        eq(siteRoles.role, 'manager'),
+      ),
+    )
+    .returning();
+
+  const linkedAssistants = await db
+    .update(siteRoles)
+    .set({ userId })
+    .where(
+      and(
+        eq(siteRoles.invitedPhone, verifiedPhone),
+        isNull(siteRoles.userId),
+        eq(siteRoles.status, 'pending'),
+        eq(siteRoles.role, 'assistant'),
+      ),
+    )
+    .returning();
+
+  return [...activatedManagers, ...linkedAssistants];
 }
