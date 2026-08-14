@@ -1,0 +1,30 @@
+{
+  "name": "request-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QR bathroom cleaning service request app: no-framework, no-bundler Lean SSR on Node.js",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "tsx --test test/router.test.ts test/render.test.ts test/static.test.ts test/server.test.ts",
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.9.0",
+    "@types/node": "^20.0.0",
+    "globals": "^17.0.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.9.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.0.0"
+  }
+}
