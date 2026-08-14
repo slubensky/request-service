@@ -4,7 +4,9 @@
 
 > **Last edited:** 2026-08-14 15:00 UTC — Phase 0 vertical slice: documented the concrete HTTP surface for Company Admin onboarding (§11.1) and the privacy-safe public scan endpoint (§11.2), and recorded that the optional public `PublicAlert` affordance is intentionally deferred for this slice (see §11.3). No role-model or data-model change; the slice reuses the merged schema and the deny-by-default capability matrix (§7) unchanged. Per AGENTS.md spec policy, edit date/time recorded here.
 >
-> **Last edited:** 2026-08-14 18:57 UTC — Phase 1 (Task 16): documented the **SMS OTP activation path** (new §6.1). Records the choice-based passwordless Cognito configuration (SMS_OTP first-auth factor, SNS delivery, auto-verified `phone_number`; `terraform validate`-only, no live apply), the single Hosted UI login entry point and factor-shared `/auth/callback`, and the rule that the server persists a `User.phone` only when the ID token reports it verified (`phone_number_verified`). No role-model or data-model change; reserves §6.2 for the following passkey/WebAuthn task. Per AGENTS.md spec policy, edit date/time recorded here.
+> **Last edited:** 2026-08-14 20:15 UTC — Phase 1 (Task 17): documented the **passkey (WebAuthn) enrollment path** (new §6.2). Records the authenticated-session enrollment entry point (`GET /auth/passkey/register`) that redirects to Cognito managed login to register a WebAuthn passkey and returns through the **factor-shared** `/auth/callback` (unchanged), reusing the existing state/session modules. Confirms the `WEB_AUTHN` first-auth factor and `web_authn_configuration` are already authored in `infra/modules/cognito` (`terraform validate`-only, no live apply). Establishes that passkey enrollment is an **identity** action gated by an authenticated session only — it confers no site authority and is therefore not a capability-matrix action (§3). No role-model or data-model change. Per AGENTS.md spec policy, edit date/time recorded here.
+>
+> **Prior edit:** 2026-08-14 18:57 UTC — Phase 1 (Task 16): documented the **SMS OTP activation path** (§6.1).
 >
 > **Last edited:** 2026-08-14 18:00 UTC — Phase 1, Manager invitation flow: documented the HTTP surface (§11.4) an authorized Site Manager uses to invite additional members (manager or assistant) to their own site, generalizing the Company Admin's initial-manager invite. Clarified §2 that a Manager also invites/promotes/revokes additional managers, not only assistants. No new capability, role, or migration — this reuses the `invite_site_role` / `site_role:invite` matrix entry (§7) and the existing SiteRole schema (§4) unchanged. Per AGENTS.md spec policy, edit date/time recorded here.
 >
@@ -154,6 +156,14 @@ All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Pa
 - An SMS OTP sign-in verifies possession of the phone, so the ID token carries `phone_number_verified: true`. The server persists the `phone` on the `User` **only when it is verified**; an unverified value is discarded and never trusted as contact identity. This verified phone is the key later used to link a phone-addressed **pending SiteRole** invite to the authenticated identity (§4, §7 activation).
 - Testing mocks Cognito end-to-end: the JWKS is injected locally and the token endpoint is stubbed (as in the PR #6/#7 auth tests), so the suite runs in CI with no external credentials and no real SMS.
 
+### 6.2 Passkey (WebAuthn) enrollment path
+
+- The user pool advertises `WEB_AUTHN` alongside `SMS_OTP` as an allowed first-auth factor and carries a `web_authn_configuration` (relying-party id + user-verification requirement) in `infra/modules/cognito`. As with SMS OTP this is authored in Terraform and validated in CI (`terraform validate`) only; no live AWS apply is in scope. Cognito owns passkey registration and assertion end-to-end — the application server never handles raw WebAuthn credentials, attestation, or the authenticator ceremony.
+- Enrollment is initiated **only from an already-authenticated session**: `GET /auth/passkey/register` reads the signed session cookie and fails closed (401) when it is absent or invalid, so an anonymous caller can never start enrollment. When Cognito is unconfigured the route fails closed (503), matching the rest of the auth surface. Like `GET /auth/login`, it mints a single-use `state` into the same short-lived HttpOnly `rs_oauth_state` cookie and redirects to the Cognito managed login authorize endpoint; because a passkey is bound to identity (not a phone), it requests the `openid` scope only.
+- Cognito performs the WebAuthn registration ceremony in managed login and redirects back to `GET /auth/callback`, which is **reused unchanged across all factors**: it validates the single-use `state`, exchanges the code, verifies the ID token via the pool JWKS, maps the subject to the same `User`, and re-issues the signed session cookie. Passkey enrollment introduces no separate callback, session, or token path — it reuses the existing state and session modules verbatim.
+- Passkey enrollment is an **identity** action, not an authority action. Per §3, enrolling a passkey confirms who you are and grants zero site authority. Access is therefore gated solely by holding a valid session; it is deliberately **not** routed through the deny-by-default capability matrix (§7), which governs site/platform authority and would wrongly deny an ordinary authenticated user with no `SiteRole`. No role is branched on — every authenticated identity may enroll a passkey for itself.
+- Testing mocks Cognito end-to-end exactly as §6.1: the enrollment route is driven with an injected session and the shared callback is exercised with a locally-signed ID token and a stubbed token endpoint, so the suite runs in CI with no external credentials and no live WebAuthn ceremony.
+
 ## 7. Authorization
 
 - **Deny-by-default, capability matrix.** Every state-changing endpoint is gated by an explicit capability matrix keyed by `(platform_role, SiteRole.role, SiteRole.status)`, scoped to the target Site (and `bathroom_scope` where applicable). A request is denied unless the matrix names an explicit allow for its endpoint given the caller's platform role and, where relevant, their SiteRole at the target Site.
@@ -261,6 +271,27 @@ site; Company Admin authority (`invite_initial_manager`) is unchanged and orthog
 The invite `POST` is state-changing and therefore requires the same session-bound CSRF
 token as the Company Admin console (§11.3); the manager console submits it via the same
 progressive-enhancement pattern (`x-csrf-token` header), inert without JS.
+
+### 11.5 Phase 1 HTTP surface — passkey (WebAuthn) enrollment (implementation)
+
+This slice adds the authenticated-session entry point that lets any signed-in identity
+enroll a WebAuthn passkey with Cognito for fast repeat authentication (§6.2). It reuses the
+Hosted UI redirect pattern of `GET /auth/login` (§6.1) and the factor-shared
+`GET /auth/callback` verbatim — no new callback, session, or token path is introduced.
+
+- `GET /auth/passkey/register` — initiates passkey enrollment. Reads the signed session
+  cookie and fails closed with `401` when it is absent or invalid, so enrollment can only
+  start from an already-authenticated session; returns `503` when Cognito is unconfigured,
+  matching the rest of the auth surface. On success it mints a single-use `state` into the
+  same short-lived HttpOnly `rs_oauth_state` cookie and `302`-redirects to the Cognito
+  managed login authorize endpoint requesting the `openid` scope only (a passkey binds to
+  identity, not a phone). Cognito runs the registration ceremony and redirects back to
+  `GET /auth/callback` (§6.1), which re-issues the session unchanged.
+- This is a safe (idempotent, `GET`) navigation that starts an OAuth redirect exactly like
+  `GET /auth/login`, so it carries no request body and is not a CSRF surface. Enrollment is
+  an **identity** action (§3, §6.2): it is gated solely by a valid session and is
+  deliberately not routed through the capability matrix (§7), which governs site/platform
+  authority; no role is branched on.
 
 ## 12. Security invariants
 
