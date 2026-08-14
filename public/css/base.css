@@ -1,0 +1,98 @@
+/*
+ * Base design tokens and mobile-first layout primitives.
+ * No CSS framework -- hand-authored, small enough to audit in one read.
+ * Mobile styles are the default; wider layouts are added via min-width
+ * media queries only (mobile-first).
+ */
+
+:root {
+  /* Color tokens */
+  --color-bg: #ffffff;
+  --color-fg: #14151a;
+  --color-muted: #5b5f6b;
+  --color-primary: #1a56db;
+  --color-primary-contrast: #ffffff;
+  --color-border: #e2e4e9;
+  --color-surface: #f7f8fa;
+
+  /* Spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+  --space-5: 2rem;
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.25rem;
+  --font-size-xl: 1.75rem;
+  --line-height-base: 1.5;
+
+  /* Shape */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #14151a;
+    --color-fg: #f2f3f5;
+    --color-muted: #9a9ea8;
+    --color-primary: #6f9bf7;
+    --color-primary-contrast: #0b1220;
+    --color-border: #2a2c34;
+    --color-surface: #1c1e26;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+}
+
+#app {
+  max-width: 32rem;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-3);
+}
+
+.page-header {
+  margin-bottom: var(--space-4);
+}
+
+.page-header h1 {
+  font-size: var(--font-size-xl);
+  margin: 0 0 var(--space-1);
+}
+
+.subtitle {
+  color: var(--color-muted);
+  margin: 0;
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+/* Wider viewports: tablet and up */
+@media (min-width: 48rem) {
+  #app {
+    padding: var(--space-5);
+  }
+}
