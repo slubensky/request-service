@@ -43,6 +43,16 @@ For every task, follow this order:
 5. Confirm all tests pass.
 6. Only then consider the change ready for review or merge.
 
+### Spec changelog (binding)
+Step 1 is not complete until the changelog is updated. Every change to the spec
+(`SDD.md`) MUST append an entry to the `## Changelog` section at the bottom of
+`SDD.md`. Each entry MUST carry:
+- A sequential change number, zero-padded to three digits (`#001`, `#002`, …).
+- An ISO-8601 date-time including UTC offset, in the America/New_York time zone
+  (e.g. `2026-08-14T16:40:56-04:00`).
+- A concise description of what changed and why.
+A spec edit without a corresponding changelog entry is not merge-ready.
+
 ## Spec policy
 - The spec is the source of truth.
 - Every behavior change must be reflected in the spec.
