@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { Router } from './router.js';
 import { serveStaticFile } from './static.js';
 import { renderHomePage } from '../render/templates/home.js';
+import { getAuthRuntime } from '../auth/config.js';
+import { registerAuthRoutes } from '../auth/routes.js';
+import { passesCsrf } from '../auth/guard.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(currentDir, '../../public');
@@ -21,6 +24,8 @@ function buildRouter(): Router {
     res.end(renderHomePage());
   });
 
+  registerAuthRoutes(router, getAuthRuntime());
+
   return router;
 }
 
@@ -36,6 +41,7 @@ function parseUrl(req: IncomingMessage): URL {
  */
 export function createApp(): (req: IncomingMessage, res: ServerResponse) => void {
   const router = buildRouter();
+  const runtime = getAuthRuntime();
 
   return (req, res) => {
     const method = req.method ?? 'GET';
@@ -43,6 +49,14 @@ export function createApp(): (req: IncomingMessage, res: ServerResponse) => void
 
     void (async () => {
       if (method === 'GET' && (await serveStaticFile(publicDir, url.pathname, res))) {
+        return;
+      }
+
+      // Complete mediation: reject state-changing requests that fail CSRF before
+      // any handler runs or any side effect can occur.
+      if (!passesCsrf(req, runtime)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Forbidden');
         return;
       }
 
