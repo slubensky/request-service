@@ -19,12 +19,14 @@ import type { AuthRuntime } from './config.js';
 import {
   buildAuthorizeUrl,
   buildLogoutUrl,
+  buildPasskeyRegistrationUrl,
   exchangeCodeForTokens,
   verifiedPhoneNumber,
   verifyIdToken,
 } from './cognito.js';
 import { clearCookie, parseCookies, serializeCookie } from './cookies.js';
 import { bridgePendingSiteRoles, findOrCreateUserByCognitoSub } from '../db/access.js';
+import { readSession } from './guard.js';
 import { signSession } from './session.js';
 
 export const SESSION_COOKIE = 'rs_session';
@@ -111,6 +113,35 @@ async function handleCallback(runtime: AuthRuntime, ctx: RouteContext): Promise<
   }
 }
 
+/**
+ * Initiates passkey (WebAuthn) enrollment for an already-authenticated session
+ * (SDD §6.2 / §11.5). Enrollment is an identity action, so the only gate is a
+ * valid session -- no role is consulted. Fails closed (503) when Cognito is
+ * unconfigured and (401) when no valid session is present, so an anonymous
+ * caller can never start enrollment. Mints a single-use `state` into the same
+ * `rs_oauth_state` cookie the factor-shared callback validates, then redirects
+ * to managed login; the ceremony returns through `/auth/callback` unchanged.
+ */
+function handlePasskeyRegister(runtime: AuthRuntime, ctx: RouteContext): void {
+  const { req, res } = ctx;
+  if (!runtime.cognito || !runtime.sessionSecret) {
+    sendStatus(res, 503, 'Authentication is not configured');
+    return;
+  }
+  if (!readSession(req, runtime)) {
+    sendStatus(res, 401, 'Authentication required');
+    return;
+  }
+  const state = randomToken();
+  const nonce = randomToken();
+  const stateCookie = serializeCookie(STATE_COOKIE, state, {
+    httpOnly: true,
+    sameSite: 'Lax',
+    maxAge: STATE_MAX_AGE_SECONDS,
+  });
+  redirect(res, buildPasskeyRegistrationUrl(runtime.cognito, state, nonce), [stateCookie]);
+}
+
 function handleLogout(runtime: AuthRuntime, { res }: RouteContext): void {
   const cleared = clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: 'Lax' });
   redirect(res, runtime.cognito ? buildLogoutUrl(runtime.cognito) : '/', [cleared]);
@@ -120,5 +151,6 @@ function handleLogout(runtime: AuthRuntime, { res }: RouteContext): void {
 export function registerAuthRoutes(router: Router, runtime: AuthRuntime): void {
   router.get('/auth/login', (ctx) => handleLogin(runtime, ctx));
   router.get('/auth/callback', (ctx) => handleCallback(runtime, ctx));
+  router.get('/auth/passkey/register', (ctx) => handlePasskeyRegister(runtime, ctx));
   router.get('/auth/logout', (ctx) => handleLogout(runtime, ctx));
 }

@@ -78,6 +78,31 @@ export function buildAuthorizeUrl(config: CognitoConfig, state: string, nonce: s
   return `${config.domain}/oauth2/authorize?${params.toString()}`;
 }
 
+/**
+ * Builds the Hosted UI authorize URL used to enroll a WebAuthn passkey from an
+ * already-authenticated session (SDD §6.2). Cognito owns the registration
+ * ceremony in managed login and returns to the factor-shared `/auth/callback`,
+ * so this reuses the same authorize endpoint, single-use `state`, and `nonce`
+ * as login. A passkey binds to identity rather than a phone, so only the
+ * `openid` scope is requested (no `phone`); the caller gates this on a valid
+ * session before ever building the URL.
+ */
+export function buildPasskeyRegistrationUrl(
+  config: CognitoConfig,
+  state: string,
+  nonce: string,
+): string {
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
+    scope: 'openid',
+    state,
+    nonce,
+  });
+  return `${config.domain}/oauth2/authorize?${params.toString()}`;
+}
+
 /** Builds the Hosted UI logout URL that clears the Cognito session and returns to the app. */
 export function buildLogoutUrl(config: CognitoConfig): string {
   const params = new URLSearchParams({
