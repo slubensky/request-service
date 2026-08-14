@@ -1,24 +1,94 @@
-# Infra skeleton (Phase 0)
+# Infra — AWS Terraform (request-service)
 
-This directory holds the Terraform scaffold for the architecture decided in
-`ARCHITECTURE.md` and the approved Blueprint (art_RUHUe0PF): AWS App Runner
-(SSR container), RDS/Aurora Serverless v2 PostgreSQL, Amazon Cognito, and
-Secrets Manager, all in `us-east-1`.
+Terraform for the QR Bathroom Cleaning Service Request App, per `ARCHITECTURE.md`
+and the approved Blueprint (art_RUHUe0PF). Everything runs in **us-east-1** and is
+a single-deployable modular monolith: one App Runner service backed by Aurora
+Serverless v2 PostgreSQL, with Amazon Cognito for authentication and Secrets
+Manager for application secrets.
 
-**Scope of this PR:** validatable skeleton only -- provider, version pins,
-and a partial S3 backend block. No AWS resources are defined yet, so there
-is nothing here that requires credentials or that `terraform apply` would
-change. Full resource definitions land in a later PR per the sandbox-first
-build plan.
+> **Scope of this PR: author only.** No `terraform apply`, no provisioning. The
+> config is credential-free and passes `terraform fmt -check` and
+> `terraform validate` in CI (`terraform init -backend=false`). AWS provisioning
+> is separately, explicitly human-gated.
+
+## Layout
+
+| Path                                        | Purpose                                                                        |
+| ------------------------------------------- | ------------------------------------------------------------------------------ |
+| `versions.tf`                               | Terraform + provider version pins; partial S3 backend.                         |
+| `main.tf`                                   | Provider config and module composition.                                        |
+| `variables.tf` / `outputs.tf` / `locals.tf` | Root inputs, outputs, name prefix.                                             |
+| `modules/network`                           | VPC, public/private subnets, NAT, app + Aurora security groups.                |
+| `modules/database`                          | Aurora Serverless v2 cluster, DB subnet group (RDS-managed credentials).       |
+| `modules/cognito`                           | User pool, managed-login domain, app client, SMS/passkey config, SMS IAM role. |
+| `modules/secrets`                           | Secrets Manager containers for Cognito + Stripe secrets.                       |
+| `modules/app_runner`                        | App Runner service, VPC connector, autoscaling, IAM roles.                     |
+| `modules/dns`                               | Optional custom-domain association + Route53/ACM wiring.                       |
 
 ## Local validation
 
 ```sh
 cd infra
+terraform fmt -check -recursive
 terraform init -backend=false
 terraform validate
 ```
 
-`-backend=false` skips backend initialization (the `s3` backend block is
-intentionally left as an empty partial configuration), so this never
-contacts AWS and never needs credentials or a real state bucket.
+`-backend=false` skips backend init (the `s3` backend is an empty partial
+configuration), so this never contacts AWS and needs no credentials.
+
+## Deploy-time inputs (no defaults / must be set for a real deploy)
+
+Validation needs **no** variables. A real (human-gated) deploy requires:
+
+| Variable                                        | Description                                                   |
+| ----------------------------------------------- | ------------------------------------------------------------- |
+| `container_image_identifier`                    | ECR image URI for the SSR container.                          |
+| `cognito_callback_urls` / `cognito_logout_urls` | OAuth callback/logout URLs for the app client.                |
+| `webauthn_relying_party_id`                     | Registrable domain passkeys bind to (e.g. `app.example.com`). |
+| `cognito_domain_prefix`                         | Managed-login (Hosted UI) domain prefix (globally unique).    |
+
+Optional custom domain:
+
+| Variable                 | Description                                                           |
+| ------------------------ | --------------------------------------------------------------------- |
+| `custom_domain`          | Custom domain for App Runner; empty disables all DNS/ACM wiring.      |
+| `route53_zone_id`        | Hosted zone that owns `custom_domain`.                                |
+| `create_acm_certificate` | Also create a standalone DNS-validated ACM cert for CDN/ALB fronting. |
+
+Tunable defaults (region-locked to `us-east-1`, low-cost Aurora ACUs, etc.) are
+documented inline in `variables.tf`.
+
+## Secrets — never committed
+
+No secret value is ever hardcoded or stored in Terraform:
+
+- **DB credentials** — RDS generates and manages them via `manage_master_user_password`;
+  the ARN is exported as `aurora_master_user_secret_arn`.
+- **Cognito app client secret** — generated by Cognito, stored in a Secrets Manager
+  container by the `secrets` module.
+- **Stripe keys** (`stripe_secret_key`, `stripe_webhook_secret`) — optional sensitive
+  variables. Left empty, only the Secrets Manager _container_ is created; the real
+  value is set out of band (CLI/console). App Runner reads all secrets at runtime via
+  a least-privilege instance role.
+
+## Backend
+
+`terraform init` for a real deploy needs backend config supplied out of band, e.g.:
+
+```sh
+terraform init \
+  -backend-config="bucket=<state-bucket>" \
+  -backend-config="key=request-service/prod.tfstate" \
+  -backend-config="region=us-east-1" \
+  -backend-config="dynamodb_table=<lock-table>"
+```
+
+## Network / connectivity notes
+
+- App Runner egress is routed through a VPC connector into the private subnets so
+  the service reaches Aurora privately; a single NAT gateway provides outbound
+  internet (Cognito, Stripe). NAT is the main standing cost — consolidate or add
+  VPC endpoints if tightening cost later.
+- The Aurora security group accepts PostgreSQL **only** from the app security group
+  (deny by default).
