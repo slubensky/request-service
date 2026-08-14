@@ -98,14 +98,17 @@ When completing a coding task, respond with:
 
 ## Performance targets
 
+> **Last edited:** 2026-08-14 — replaced the prior LLM-app targets (time to first token, time to segment annotation render, full response time) and the generic `< 100 ms` cold page load figure with mobile-first Web Vitals appropriate to the QR Bathroom Cleaning Service Request App. The no-framework / no-bundler architectural rule is unchanged; see ARCHITECTURE.md §5 for the full rationale.
+
 | Requirement | Target |
 | --- | --- |
-| Time to first token | < 400 ms (p95) |
-| Time to segment annotation render | < 600 ms (p95, JSON parsed before first text token) |
-| Full response time | < 3 s (p95, typical decode) |
-| Page load (cold) | < 100 ms (no framework, no bundler) |
+| FCP (First Contentful Paint) | < 1.5 s (mid-tier mobile, 4G) |
+| LCP (Largest Contentful Paint) | < 2.5 s (mid-tier mobile, 4G) |
+| INP (Interaction to Next Paint) | < 200 ms |
+| CLS (Cumulative Layout Shift) | < 0.1 |
+| TTFB (SSR) | < 200 ms (p95) |
+| Client JS budget | < 50 KB gzipped (public visitor page ≈ 0 KB — no framework, no bundler) |
 | Concurrent users | 50 simultaneous (single process; scale horizontally if needed) |
-| Availability | Best-effort; depends on Claude API uptime |
 | HTTPS | Required in production (terminate at reverse proxy or platform) |
 
 ## Branch
