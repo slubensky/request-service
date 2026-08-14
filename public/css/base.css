@@ -90,6 +90,88 @@ body {
   padding: var(--space-3);
 }
 
+.card + .card,
+.card.site {
+  margin-top: var(--space-3);
+}
+
+.muted-note {
+  color: var(--color-muted);
+  margin: var(--space-2) 0 0;
+}
+
+.stack-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.stack-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-base);
+}
+
+.stack-form input {
+  padding: var(--space-2);
+  font-size: var(--font-size-base);
+  color: var(--color-fg);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+button {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-primary-contrast);
+  background: var(--color-primary);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.bathrooms {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-3) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.bathroom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.bathrooms .empty {
+  color: var(--color-muted);
+}
+
+.inline-form {
+  margin: 0;
+}
+
+.qr-card {
+  text-align: center;
+}
+
+.qr-image {
+  max-width: 16rem;
+  margin: 0 auto;
+}
+
+.qr-image svg {
+  width: 100%;
+  height: auto;
+}
+
 /* Wider viewports: tablet and up */
 @media (min-width: 48rem) {
   #app {
