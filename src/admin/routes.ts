@@ -12,18 +12,18 @@
  * site-scoped onboarding actions are satisfied by the platform matrix cross-
  * site. No route branches on role directly.
  */
-import type { ServerResponse } from 'node:http';
 import type { Router, RouteContext } from '../server/router.js';
 import type { AuthRuntime } from '../auth/config.js';
-import type { AppDatabase } from '../db/client.js';
-import type { Action } from '../auth/authorize.js';
 import { readSession } from '../auth/guard.js';
 import { authorizeAction } from '../auth/enforce.js';
+import { authorizeOrReject } from '../auth/gate.js';
 import { parseCookies } from '../auth/cookies.js';
 import { SESSION_COOKIE } from '../auth/routes.js';
 import { csrfTokenForSession } from '../auth/csrf.js';
 import { getEnv } from '../config/env.js';
 import { readFormBody, BodyTooLargeError } from '../server/body.js';
+import { sendText } from '../server/respond.js';
+import { requireField, parsePhone, type ParseResult } from '../server/validation.js';
 import {
   addBathroom,
   createSite,
@@ -37,28 +37,6 @@ import {
 } from './service.js';
 import { renderAdminConsole, renderQrIssued } from '../render/templates/admin.js';
 import { renderQrSvg } from '../qr/image.js';
-
-function sendText(res: ServerResponse, status: number, message: string): void {
-  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end(message);
-}
-
-type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string };
-
-function requireField(
-  fields: Record<string, string>,
-  name: string,
-  max: number,
-): ParseResult<string> {
-  const value = (fields[name] ?? '').trim();
-  if (value.length === 0) {
-    return { ok: false, error: `Missing ${name}` };
-  }
-  if (value.length > max) {
-    return { ok: false, error: `${name} is too long` };
-  }
-  return { ok: true, value };
-}
 
 /** Parses and validates the create-site form. Nothing here is trusted unvalidated. */
 function parseCreateSiteInput(fields: Record<string, string>): ParseResult<CreateSiteInput> {
@@ -87,44 +65,6 @@ function parseCreateSiteInput(fields: Record<string, string>): ParseResult<Creat
       fixedPriceCents,
     },
   };
-}
-
-/** Validates an invited-manager phone: a lenient E.164-ish shape, length-capped. */
-function parsePhone(fields: Record<string, string>): ParseResult<string> {
-  const field = requireField(fields, 'phone', 32);
-  if (!field.ok) return field;
-  if (!/^[+0-9()\-\s]{4,32}$/.test(field.value)) {
-    return { ok: false, error: 'phone has an unexpected format' };
-  }
-  return { ok: true, value: field.value };
-}
-
-/**
- * Shared gate: resolves the session, ensures the DB is configured, and
- * authorizes `action` via the matrix. Returns the authenticated user id + db on
- * success, or writes the appropriate 401/403/503 and returns null.
- */
-async function authorizeOrReject(
-  runtime: AuthRuntime,
-  { req, res }: RouteContext,
-  action: Action,
-): Promise<{ db: AppDatabase; userId: string } | null> {
-  const session = readSession(req, runtime);
-  if (!session) {
-    sendText(res, 401, 'Authentication required');
-    return null;
-  }
-  const db = runtime.connection?.db;
-  if (!db) {
-    sendText(res, 503, 'Onboarding is not configured');
-    return null;
-  }
-  const decision = await authorizeAction(db, session.userId, action);
-  if (!decision.allowed) {
-    sendText(res, 403, 'Forbidden');
-    return null;
-  }
-  return { db, userId: session.userId };
 }
 
 /** Base URL a printed QR should point at: an explicit env override, else the request host. */

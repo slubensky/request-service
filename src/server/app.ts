@@ -7,6 +7,7 @@ import { renderHomePage } from '../render/templates/home.js';
 import { getAuthRuntime } from '../auth/config.js';
 import { registerAuthRoutes } from '../auth/routes.js';
 import { registerAdminRoutes } from '../admin/routes.js';
+import { registerManagerRoutes } from '../manager/routes.js';
 import { registerPublicRoutes } from '../public/routes.js';
 import { passesCsrf } from '../auth/guard.js';
 import type { AuthRuntime } from '../auth/config.js';
@@ -29,6 +30,7 @@ function buildRouter(runtime: AuthRuntime): Router {
 
   registerAuthRoutes(router, runtime);
   registerAdminRoutes(router, runtime);
+  registerManagerRoutes(router, runtime);
   registerPublicRoutes(router, runtime);
 
   return router;
