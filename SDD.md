@@ -320,3 +320,20 @@ These decisions are locked pending final sign-off on the Blueprint (`art_RUHUe0P
 - **Delivery:** build and host in the sandbox first; PR into `main` and AWS deploy only after human review, per the Blueprint's sandbox-first build plan.
 
 Each new dependency (Drizzle, Stripe SDK, `qrcode`, AWS SDK) and each managed service (Cognito, RDS/Aurora, App Runner) is justified above and in ARCHITECTURE.md before adoption, per AGENTS.md's minimal-dependency rule.
+
+## Changelog
+
+Per AGENTS.md's binding spec-changelog rule, every change to this spec appends an entry
+here. Format:
+
+- **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
+- **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
+- **Description:** a concise statement of what changed and why.
+
+### #001 — 2026-08-14T16:41:28-04:00
+
+Establishes this changelog convention per AGENTS.md's spec-changelog rule. Baseline:
+Phase 0–1 as currently merged (Company Admin onboarding, privacy-safe public scan,
+Cognito SMS OTP + passkey auth, Site Manager invitation flow, capability-matrix
+authorization). No behavior or spec content changed by this entry; it only records the
+format future entries must follow.
