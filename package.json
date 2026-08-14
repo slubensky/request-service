@@ -12,6 +12,7 @@
     "start": "tsx src/index.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
+    "test": "tsx --test test/router.test.ts test/render.test.ts test/static.test.ts test/server.test.ts test/authorize.test.ts test/session.test.ts test/csrf.test.ts test/cognito.test.ts test/sms-otp.test.ts test/db.test.ts test/admin.test.ts test/public-scan.test.ts",
     "test": "tsx --test test/router.test.ts test/render.test.ts test/static.test.ts test/server.test.ts test/authorize.test.ts test/session.test.ts test/csrf.test.ts test/cognito.test.ts test/db.test.ts test/admin.test.ts test/public-scan.test.ts test/manager.test.ts",
     "build": "node scripts/build.mjs",
     "db:generate": "drizzle-kit generate",

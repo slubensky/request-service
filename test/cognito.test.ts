@@ -13,8 +13,10 @@ import {
   buildAuthorizeUrl,
   buildLogoutUrl,
   exchangeCodeForTokens,
+  verifiedPhoneNumber,
   verifyIdToken,
   type CognitoConfig,
+  type CognitoIdentity,
 } from '../src/auth/cognito.js';
 
 // Fixture config with obviously-fake placeholders -- no real credentials.
@@ -64,6 +66,13 @@ test('buildAuthorizeUrl includes the client, redirect, and state', () => {
   assert.equal(url.searchParams.get('state'), 'state-xyz');
 });
 
+test('buildAuthorizeUrl requests the phone scope so an SMS OTP sign-in returns a verified phone', () => {
+  const url = new URL(buildAuthorizeUrl(config, 'state-xyz', 'nonce-abc'));
+  const scopes = (url.searchParams.get('scope') ?? '').split(' ');
+  assert.ok(scopes.includes('openid'));
+  assert.ok(scopes.includes('phone'));
+});
+
 test('buildLogoutUrl targets the Hosted UI logout endpoint', () => {
   const url = new URL(buildLogoutUrl(config));
   assert.equal(url.origin + url.pathname, `${config.domain}/logout`);
@@ -79,6 +88,64 @@ test('verifyIdToken accepts a valid token and returns the identity', async () =>
   const identity = await verifyIdToken(token, config, jwks);
   assert.equal(identity.sub, 'cognito-sub-123');
   assert.equal(identity.phoneNumber, '+15555550100');
+});
+
+test('verifyIdToken reports a verified phone from an SMS OTP sign-in', async () => {
+  const { privateKey, jwks } = await makeKeys();
+  const token = await signIdToken(privateKey, {
+    token_use: 'id',
+    phone_number: '+15555550100',
+    phone_number_verified: true,
+  });
+  const identity = await verifyIdToken(token, config, jwks);
+  assert.equal(identity.phoneNumber, '+15555550100');
+  assert.equal(identity.phoneNumberVerified, true);
+});
+
+test('verifyIdToken treats a stringified phone_number_verified as verified', async () => {
+  const { privateKey, jwks } = await makeKeys();
+  const token = await signIdToken(privateKey, {
+    token_use: 'id',
+    phone_number: '+15555550100',
+    phone_number_verified: 'true',
+  });
+  const identity = await verifyIdToken(token, config, jwks);
+  assert.equal(identity.phoneNumberVerified, true);
+});
+
+test('verifyIdToken reports an unverified phone as not verified', async () => {
+  const { privateKey, jwks } = await makeKeys();
+  const token = await signIdToken(privateKey, {
+    token_use: 'id',
+    phone_number: '+15555550100',
+    phone_number_verified: false,
+  });
+  const identity = await verifyIdToken(token, config, jwks);
+  assert.equal(identity.phoneNumber, '+15555550100');
+  assert.equal(identity.phoneNumberVerified, false);
+});
+
+test('verifyIdToken defaults phoneNumberVerified to false when the claim is absent', async () => {
+  const { privateKey, jwks } = await makeKeys();
+  const token = await signIdToken(privateKey, { token_use: 'id' });
+  const identity = await verifyIdToken(token, config, jwks);
+  assert.equal(identity.phoneNumber, null);
+  assert.equal(identity.phoneNumberVerified, false);
+});
+
+test('verifiedPhoneNumber returns the number only when verified', () => {
+  const verified: CognitoIdentity = {
+    sub: 's',
+    phoneNumber: '+15555550100',
+    phoneNumberVerified: true,
+  };
+  const unverified: CognitoIdentity = {
+    sub: 's',
+    phoneNumber: '+15555550100',
+    phoneNumberVerified: false,
+  };
+  assert.equal(verifiedPhoneNumber(verified), '+15555550100');
+  assert.equal(verifiedPhoneNumber(unverified), null);
 });
 
 test('verifyIdToken rejects a wrong audience', async () => {
