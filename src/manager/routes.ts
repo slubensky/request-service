@@ -24,9 +24,17 @@ import { readFormBody, BodyTooLargeError } from '../server/body.js';
 import { sendText } from '../server/respond.js';
 import { requireField, parsePhone, type ParseResult } from '../server/validation.js';
 import { FixedWindowRateLimiter } from '../server/rate-limit.js';
-import { inviteSiteMember, listManagedSites, type InvitableRole } from './service.js';
+import {
+  inviteSiteMember,
+  listManagedSites,
+  type InvitableRole,
+  type ManagedSite,
+} from './service.js';
 import { SiteNotFoundError } from '../admin/service.js';
 import { renderManagerConsole } from '../render/templates/manager.js';
+import { isDemoMode } from '../demo/config.js';
+import { issueDemoInviteCode, unusedCodesForSiteRoles } from '../demo/service.js';
+import type { AppDatabase } from '../db/client.js';
 
 // Per-user budget for invite creation: generous for genuine onboarding, low
 // enough to bound spam pending-row creation since no SMS cost gates it yet.
@@ -66,8 +74,29 @@ async function handleConsole(runtime: AuthRuntime, ctx: RouteContext): Promise<v
   const managedSites = await listManagedSites(db, session.userId);
   const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
   const csrfToken = csrfTokenForSession(sessionToken, secret);
+  // Demo-only (SDD §6.3): surface the single-use accept code for each pending
+  // invite. Empty (and unrendered) whenever DEMO_MODE is off.
+  const demoCodes = await demoCodesForConsole(db, managedSites);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(renderManagerConsole(managedSites, csrfToken));
+  res.end(renderManagerConsole(managedSites, csrfToken, demoCodes));
+}
+
+/**
+ * Collects the outstanding demo accept code for every pending invite on the
+ * console. Returns an empty map when DEMO_MODE is off, so the console renders no
+ * codes in production.
+ */
+async function demoCodesForConsole(
+  db: AppDatabase,
+  managedSites: ManagedSite[],
+): Promise<Map<string, string>> {
+  if (!isDemoMode()) {
+    return new Map();
+  }
+  const pendingIds = managedSites.flatMap((entry) =>
+    entry.pendingInvites.map((invite) => invite.id),
+  );
+  return unusedCodesForSiteRoles(db, pendingIds);
 }
 
 function registerInviteHandler(
@@ -107,14 +136,20 @@ function registerInviteHandler(
       return;
     }
 
+    let invited;
     try {
-      await inviteSiteMember(gate.db, siteId, role.value, phone.value);
+      invited = await inviteSiteMember(gate.db, siteId, role.value, phone.value);
     } catch (error) {
       if (error instanceof SiteNotFoundError) {
         sendText(ctx.res, 404, 'Site not found');
         return;
       }
       throw error;
+    }
+    // Demo-only (SDD §6.3): mint the single-use accept code so the console can
+    // display it; a no-op in production where DEMO_MODE is off.
+    if (isDemoMode()) {
+      await issueDemoInviteCode(gate.db, invited.id);
     }
     ctx.res.writeHead(204).end();
   });

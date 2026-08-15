@@ -197,6 +197,26 @@ export const publicAlerts = pgTable('public_alerts', {
   createdAt: createdAt(),
 });
 
+// Demo-only (SDD §6.3): a single-use invite code bound to one pending SiteRole.
+// Present in every environment but written/read only when DEMO_MODE is on; it
+// lets the invite -> accept -> activation loop be walked without live SMS/Cognito.
+// It confers no authority itself -- acceptance reuses the §3.3 bridge unchanged.
+export const demoInviteCodes = pgTable(
+  'demo_invite_codes',
+  {
+    id: id(),
+    siteRoleId: uuid('site_role_id')
+      .notNull()
+      .references(() => siteRoles.id, { onDelete: 'cascade' }),
+    // The opaque, human-typable code handed to the invitee (unique across the table).
+    code: text('code').notNull(),
+    // Set the moment the code is claimed; a non-null value means it is spent (single-use).
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (table) => [uniqueIndex('demo_invite_codes_code_key').on(table.code)],
+);
+
 export const siteRelations = relations(sites, ({ many }) => ({
   bathrooms: many(bathrooms),
   roles: many(siteRoles),
@@ -221,3 +241,4 @@ export type CleaningRequestRow = typeof cleaningRequests.$inferSelect;
 export type PaymentAuthorizationRow = typeof paymentAuthorizations.$inferSelect;
 export type AssistantApprovalRequestRow = typeof assistantApprovalRequests.$inferSelect;
 export type PublicAlertRow = typeof publicAlerts.$inferSelect;
+export type DemoInviteCodeRow = typeof demoInviteCodes.$inferSelect;

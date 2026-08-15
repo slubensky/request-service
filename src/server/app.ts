@@ -9,6 +9,7 @@ import { registerAuthRoutes } from '../auth/routes.js';
 import { registerAdminRoutes } from '../admin/routes.js';
 import { registerManagerRoutes } from '../manager/routes.js';
 import { registerPublicRoutes } from '../public/routes.js';
+import { registerDemoRoutes, isDemoAcceptSubmission } from '../demo/routes.js';
 import { passesCsrf } from '../auth/guard.js';
 import type { AuthRuntime } from '../auth/config.js';
 
@@ -32,6 +33,8 @@ function buildRouter(runtime: AuthRuntime): Router {
   registerAdminRoutes(router, runtime);
   registerManagerRoutes(router, runtime);
   registerPublicRoutes(router, runtime);
+  // Demo invite-code acceptance (SDD §6.3): registers nothing unless DEMO_MODE is on.
+  registerDemoRoutes(router, runtime);
 
   return router;
 }
@@ -60,8 +63,11 @@ export function createApp(): (req: IncomingMessage, res: ServerResponse) => void
       }
 
       // Complete mediation: reject state-changing requests that fail CSRF before
-      // any handler runs or any side effect can occur.
-      if (!passesCsrf(req, runtime)) {
+      // any handler runs or any side effect can occur. The demo accept POST (SDD
+      // §6.3) is the sole exemption -- it is a pre-session flow that carries its
+      // own origin-bound double-submit token, and the exemption is itself
+      // DEMO_MODE-gated, so this branch is never taken in production.
+      if (!isDemoAcceptSubmission(method, url.pathname) && !passesCsrf(req, runtime)) {
         res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Forbidden');
         return;
