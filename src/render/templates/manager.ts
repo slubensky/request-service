@@ -8,24 +8,16 @@
  */
 import { escapeHtml } from '../escape.js';
 import { renderLayout } from './layout.js';
+import { renderDemoInviteCode } from './demo-invite-code.js';
 import type { ManagedSite } from '../../manager/service.js';
 import type { SiteRoleRow } from '../../db/schema.js';
-
-// Demo-only (SDD §6.3): the single-use accept code plus a copyable accept link.
-// Rendered only when a code is present for the invite (DEMO_MODE on); otherwise
-// the invite renders exactly as before.
-function renderDemoCode(code: string): string {
-  const safeCode = escapeHtml(code);
-  const acceptLink = `/invite/accept?code=${encodeURIComponent(code)}`;
-  return `
-            <span class="invite-code">Code: <code>${safeCode}</code></span>
-            <a class="invite-accept-link" href="${escapeHtml(acceptLink)}">Accept link</a>`;
-}
 
 function renderPendingInvite(invite: SiteRoleRow, demoCode: string | undefined): string {
   const safePhone = escapeHtml(invite.invitedPhone ?? 'unknown number');
   const safeRole = escapeHtml(invite.role);
-  const demoHtml = demoCode ? renderDemoCode(demoCode) : '';
+  // Demo-only (SDD §6.3): rendered only when a code is present for the invite
+  // (DEMO_MODE on); otherwise the invite renders exactly as before.
+  const demoHtml = demoCode ? renderDemoInviteCode(demoCode) : '';
   return `
           <li class="invite">
             <span class="invite-phone">${safePhone}</span>

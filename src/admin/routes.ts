@@ -34,9 +34,13 @@ import {
   BathroomNotFoundError,
   type CreateSiteInput,
   type IssuedQrToken,
+  type SiteWithBathrooms,
 } from './service.js';
 import { renderAdminConsole, renderQrIssued } from '../render/templates/admin.js';
 import { renderQrSvg } from '../qr/image.js';
+import { isDemoMode } from '../demo/config.js';
+import { issueDemoInviteCode, unusedCodesForSiteRoles } from '../demo/service.js';
+import type { AppDatabase } from '../db/client.js';
 
 /** Parses and validates the create-site form. Nothing here is trusted unvalidated. */
 function parseCreateSiteInput(fields: Record<string, string>): ParseResult<CreateSiteInput> {
@@ -101,8 +105,30 @@ async function handleConsole(runtime: AuthRuntime, ctx: RouteContext): Promise<v
   const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
   const csrfToken = csrfTokenForSession(sessionToken, secret);
   const siteList = await listSitesWithBathrooms(db);
+  // Demo-only (SDD §6.3): surface the single-use accept code for each pending
+  // invite. `demoCodesForConsole` returns an empty map off DEMO_MODE, and
+  // `demoMode` itself gates whether the pending-invites section renders at all
+  // -- the console is byte-for-byte unchanged in production.
+  const demoMode = isDemoMode();
+  const demoCodes = await demoCodesForConsole(db, siteList);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(renderAdminConsole(siteList, csrfToken));
+  res.end(renderAdminConsole(siteList, csrfToken, demoMode, demoCodes));
+}
+
+/**
+ * Collects the outstanding demo accept code for every pending invite on the
+ * console. Returns an empty map when DEMO_MODE is off, so the console renders no
+ * codes in production. Mirrors `demoCodesForConsole` in `manager/routes.ts`.
+ */
+async function demoCodesForConsole(
+  db: AppDatabase,
+  siteList: SiteWithBathrooms[],
+): Promise<Map<string, string>> {
+  if (!isDemoMode()) {
+    return new Map();
+  }
+  const pendingIds = siteList.flatMap((entry) => entry.pendingInvites.map((invite) => invite.id));
+  return unusedCodesForSiteRoles(db, pendingIds);
 }
 
 async function handleCreateSite(runtime: AuthRuntime, ctx: RouteContext): Promise<void> {
@@ -178,14 +204,21 @@ async function handleInviteManager(runtime: AuthRuntime, ctx: RouteContext): Pro
     sendText(ctx.res, 400, phone.error);
     return;
   }
+  let invited;
   try {
-    await inviteInitialManager(gate.db, siteId, phone.value);
+    invited = await inviteInitialManager(gate.db, siteId, phone.value);
   } catch (error) {
     if (error instanceof SiteNotFoundError) {
       sendText(ctx.res, 404, 'Site not found');
       return;
     }
     throw error;
+  }
+  // Demo-only (SDD §6.3): mint the single-use accept code so the console can
+  // display it, via the same service the manager console uses; a no-op in
+  // production where DEMO_MODE is off.
+  if (isDemoMode()) {
+    await issueDemoInviteCode(gate.db, invited.id);
   }
   ctx.res.writeHead(204).end();
 }

@@ -135,9 +135,11 @@ export async function inviteInitialManager(
 export interface SiteWithBathrooms {
   site: SiteRow;
   bathrooms: BathroomRow[];
+  /** SiteRoles at this site not yet linked to an identity, newest first. */
+  pendingInvites: SiteRoleRow[];
 }
 
-/** Lists every Site with its Bathrooms for the Company-Admin console. */
+/** Lists every Site with its Bathrooms and pending invites for the Company-Admin console. */
 export async function listSitesWithBathrooms(db: AppDatabase): Promise<SiteWithBathrooms[]> {
   const siteRows = await db.select().from(sites).orderBy(sites.createdAt);
   const result: SiteWithBathrooms[] = [];
@@ -147,7 +149,12 @@ export async function listSitesWithBathrooms(db: AppDatabase): Promise<SiteWithB
       .from(bathrooms)
       .where(eq(bathrooms.siteId, site.id))
       .orderBy(bathrooms.createdAt);
-    result.push({ site, bathrooms: bathroomRows });
+    const pendingInvites = await db
+      .select()
+      .from(siteRoles)
+      .where(and(eq(siteRoles.siteId, site.id), eq(siteRoles.status, 'pending')))
+      .orderBy(siteRoles.createdAt);
+    result.push({ site, bathrooms: bathroomRows, pendingInvites });
   }
   return result;
 }

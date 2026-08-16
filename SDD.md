@@ -171,19 +171,27 @@ walked in a browser during demos and local development, without live SMS deliver
 Cognito user pool. It is gated end-to-end behind a single `DEMO_MODE` environment flag
 and is **inert in production**, where the flag is unset. Production activation remains
 phone-verified via SMS OTP (§6.1) plus the §3.3 bridge; this path neither alters nor
-weakens that production flow.
+weakens that production flow. Both consoles that create an invite — the Site Manager
+console (§11.4) and the Company Admin console (§11.1, initial-manager invite) — surface
+the resulting code under `DEMO_MODE`; see the "Code minting & display" bullet below.
 
 - **Gating.** When `DEMO_MODE` is off (the production default): no invite code is
   generated or displayed, and the accept routes are **not registered at all** — a request
   to `/invite/accept` is an ordinary `404`. Every demo behaviour below is reachable only
   when the flag is on, so the production build carries the code but never exposes it.
-- **Code minting & display.** When an authorized Site Manager creates an invite (§11.4)
-  in `DEMO_MODE`, the server mints a **single-use** code tied to that specific pending
+- **Code minting & display.** When an authorized Site Manager creates an invite (§11.4),
+  or a Company Admin creates the initial manager invite for a Site (§11.1), in
+  `DEMO_MODE` the server mints a **single-use** code tied to that specific pending
   SiteRole and persists it (`demo_invite_codes`, one usable row per pending invite;
-  repeat invites reuse the still-unused code rather than minting duplicates). The Site
-  Manager console then displays the code alongside a copyable `GET /invite/accept?code=…`
-  link for that invite. The code binds a demo accept to one pending SiteRole; it confers
-  no authority by itself.
+  repeat invites reuse the still-unused code rather than minting duplicates) via the same
+  `issueDemoInviteCode` service call — there is no parallel minting path for the admin
+  case. Whichever console created the invite then displays the code alongside a copyable
+  `GET /invite/accept?code=…` link for that invite: the Site Manager console for invites
+  it creates, and — as of this change — the Company Admin console for the initial manager
+  invite it creates, so the very first invite of a new Site (which only a Company Admin
+  can issue) is also click-through demoable. Both consoles render nothing extra when
+  `DEMO_MODE` is off. The code binds a demo accept to one pending SiteRole; it confers no
+  authority by itself.
 - **Accept URL.** `GET /invite/accept` renders a form (the invited person types or
   arrives with a prefilled code) and mints a short-lived, origin-bound double-submit CSRF
   token into an HttpOnly `rs_demo_csrf` cookie plus a matching hidden form field. Because
@@ -378,6 +386,16 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #003 — 2026-08-16T13:33:21-04:00
+
+Amends §6.3 to state that under `DEMO_MODE` the Company Admin console also surfaces the
+single-use invite code and copyable accept link when it creates the initial manager
+invite for a Site (§11.1) — previously this display was Site Manager-console-only
+(§11.4). The minting path is unchanged: both consoles call the same
+`issueDemoInviteCode` service, so no parallel code path is introduced. Production
+(`DEMO_MODE` off) is unaffected — the admin console renders nothing new and its
+routes/markup are byte-for-byte unchanged.
+
 ### #002 — 2026-08-14T16:56:54-04:00
 
 Adds §6.3 Demo invitation-code activation (DEMO_MODE): a `DEMO_MODE`-gated path that lets
@@ -398,3 +416,38 @@ Phase 0–1 as currently merged (Company Admin onboarding, privacy-safe public s
 Cognito SMS OTP + passkey auth, Site Manager invitation flow, capability-matrix
 authorization). No behavior or spec content changed by this entry; it only records the
 format future entries must follow.
+
+## Pre-convention history (PR #1–#13)
+
+The numbered, timestamped changelog convention above starts with `#001`. It was
+introduced by PR #13 and does not retroactively number the PRs that came before it.
+This section backfills that gap with a complete, auditable record of every PR merged to
+`main` before the convention existed, reconstructed from `git log --oneline --merges` and
+`gh pr list --state merged` (merge commit and merge timestamp cross-checked against both).
+It is historical record only — append-only numbering resumes at `#001` above and is
+unaffected by this table.
+
+| PR  | Description                                                                                                       | Merged (America/New_York) | Merge commit |
+| --- | ----------------------------------------------------------------------------------------------------------------- | ------------------------- | ------------ |
+| #1  | docs: author SDD, ARCHITECTURE, and update AGENTS.md perf targets                                                 | 2026-08-14 12:51 EDT      | `dcc9998`    |
+| #2  | feat: scaffold no-framework Lean SSR app with green CI pipeline                                                   | 2026-08-14 12:46 EDT      | `09fadfb`    |
+| #3  | fix: apply prettier formatting to SDD.md and ARCHITECTURE.md                                                      | 2026-08-14 12:59 EDT      | `09b7861`    |
+| #4  | feat(infra): author AWS Terraform for App Runner, Aurora v2, Cognito & Secrets (validate-only; no live AWS apply) | 2026-08-14 13:17 EDT      | `0f7dbfe`    |
+| #5  | docs: reintroduce Company Admin role in SDD.md                                                                    | 2026-08-14 13:30 EDT      | `ab7978a`    |
+| #6  | feat(auth): data layer, capability-matrix authorization, and Cognito wiring                                       | 2026-08-14 13:32 EDT      | `7b1f81a`    |
+| #7  | feat(admin): company-admin onboarding, QR issuance, and privacy-safe public scan                                  | 2026-08-14 14:09 EDT      | `9974c01`    |
+| #8  | feat(auth): surface and verify the Cognito SMS OTP factor                                                         | 2026-08-14 15:15 EDT      | `807b006`    |
+| #9  | feat(manager): site manager invitation flow (pending SiteRole)                                                    | 2026-08-14 15:09 EDT      | `32b61f9`    |
+| #10 | fix: restore SMS OTP suite to CI test script dropped by PR #8 merge                                               | 2026-08-14 15:24 EDT      | `4c394da`    |
+| #11 | feat(auth): activate pending SiteRole on invitee authentication (§3.3 invite bridge)                              | 2026-08-14 15:25 EDT      | `db74db6`    |
+| #12 | feat(auth): passkey (WebAuthn) enrollment for authenticated sessions                                              | 2026-08-14 15:58 EDT      | `c1c4aad`    |
+| #13 | chore: bind spec changelog rule and auto-discover test suites                                                     | 2026-08-14 16:52 EDT      | `f4c39a9`    |
+
+Notes:
+
+- PR #9 (15:09 EDT) merged a few minutes before PR #8 (15:15 EDT) despite the lower PR
+  number opening first; the table above orders by actual merge time, not PR number.
+- PR #10 is a same-day regression fix for a test-script omission introduced while
+  merging PR #8, not a feature change.
+- PR #14, the first PR under the numbered convention, is recorded as `#002` above rather
+  than repeated in this table.
