@@ -7,7 +7,7 @@
  * `authorizeAction` so the deny-by-default matrix (§7) is the single gate.
  * All queries are parameterized through Drizzle; nothing is built from raw SQL.
  */
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull, ne } from 'drizzle-orm';
 import type { AppDatabase } from '../db/client.js';
 import {
   bathrooms,
@@ -112,6 +112,11 @@ export async function issueQrToken(
  * SiteRole with a null `user_id`; the invite bridge (§3.3) links it to an
  * identity when the invitee first authenticates. Confers no authority until
  * then. Throws when the Site does not exist.
+ *
+ * Idempotent like `inviteSiteMember` (SDD §11.1, §11.4): a repeat invite for
+ * the same not-yet-linked phone at this Site returns the existing pending
+ * record instead of inserting a duplicate row, so the §3.3 bridge never faces
+ * two pending invites for the same phone+site+role from this path.
  */
 export async function inviteInitialManager(
   db: AppDatabase,
@@ -122,6 +127,24 @@ export async function inviteInitialManager(
   if (!site) {
     throw new SiteNotFoundError();
   }
+
+  const [existing] = await db
+    .select()
+    .from(siteRoles)
+    .where(
+      and(
+        eq(siteRoles.siteId, siteId),
+        eq(siteRoles.invitedPhone, invitedPhone),
+        eq(siteRoles.role, 'manager'),
+        isNull(siteRoles.userId),
+        ne(siteRoles.status, 'revoked'),
+      ),
+    )
+    .limit(1);
+  if (existing) {
+    return existing;
+  }
+
   const [row] = await db
     .insert(siteRoles)
     .values({ siteId, invitedPhone, role: 'manager', status: 'pending' })
