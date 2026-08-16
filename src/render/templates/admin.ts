@@ -8,7 +8,22 @@
  */
 import { escapeHtml } from '../escape.js';
 import { renderLayout } from './layout.js';
+import { renderDemoInviteCode } from './demo-invite-code.js';
 import type { SiteWithBathrooms } from '../../admin/service.js';
+import type { SiteRoleRow } from '../../db/schema.js';
+
+function renderPendingInvite(invite: SiteRoleRow, demoCode: string | undefined): string {
+  const safePhone = escapeHtml(invite.invitedPhone ?? 'unknown number');
+  const safeRole = escapeHtml(invite.role);
+  // Demo-only (SDD §6.3): rendered only when a code is present for the invite
+  // (DEMO_MODE on); otherwise the invite renders exactly as before.
+  const demoHtml = demoCode ? renderDemoInviteCode(demoCode) : '';
+  return `
+          <li class="invite">
+            <span class="invite-phone">${safePhone}</span>
+            <span class="invite-role">${safeRole}</span>${demoHtml}
+          </li>`;
+}
 
 function renderBathroom(siteId: string, bathroomId: string, label: string): string {
   const safeLabel = escapeHtml(label);
@@ -24,7 +39,28 @@ function renderBathroom(siteId: string, bathroomId: string, label: string): stri
           </li>`;
 }
 
-function renderSite(entry: SiteWithBathrooms): string {
+// Demo-only (SDD §6.3): the pending-invites list itself is new admin-console
+// surface introduced for the demo click-through and is gated on DEMO_MODE as a
+// whole, not just the code/link within it -- with DEMO_MODE off the admin
+// console must render byte-for-byte as it did before this feature existed.
+function renderPendingInvites(
+  entry: SiteWithBathrooms,
+  demoCodes: ReadonlyMap<string, string>,
+): string {
+  const invitesHtml =
+    entry.pendingInvites.length === 0
+      ? '<li class="empty">No pending invites.</li>'
+      : entry.pendingInvites
+          .map((invite) => renderPendingInvite(invite, demoCodes.get(invite.id)))
+          .join('');
+  return `\n        <ul class="invites">${invitesHtml}</ul>`;
+}
+
+function renderSite(
+  entry: SiteWithBathrooms,
+  demoMode: boolean,
+  demoCodes: ReadonlyMap<string, string>,
+): string {
   const { site } = entry;
   const safeName = escapeHtml(site.name);
   const safeAddress = escapeHtml(site.address);
@@ -32,13 +68,14 @@ function renderSite(entry: SiteWithBathrooms): string {
     entry.bathrooms.length === 0
       ? '<li class="empty">No bathrooms yet.</li>'
       : entry.bathrooms.map((b) => renderBathroom(site.id, b.id, b.label)).join('');
+  const invitesSection = demoMode ? renderPendingInvites(entry, demoCodes) : '';
   const bathroomAction = `/admin/sites/${encodeURIComponent(site.id)}/bathrooms`;
   const managerAction = `/admin/sites/${encodeURIComponent(site.id)}/managers`;
   return `
       <section class="card site">
         <h3>${safeName}</h3>
         <p class="subtitle">${safeAddress}</p>
-        <ul class="bathrooms">${bathroomsHtml}</ul>
+        <ul class="bathrooms">${bathroomsHtml}</ul>${invitesSection}
         <form class="stack-form" method="post" action="${escapeHtml(bathroomAction)}" data-admin-form>
           <label>Bathroom label
             <input name="label" required maxlength="120" autocomplete="off" />
@@ -54,12 +91,23 @@ function renderSite(entry: SiteWithBathrooms): string {
       </section>`;
 }
 
-/** Renders the console: a create-site form plus each site with its onboarding actions. */
-export function renderAdminConsole(sites: SiteWithBathrooms[], csrfToken: string): string {
+/**
+ * Renders the console: a create-site form plus each site with its onboarding
+ * actions. `demoMode` gates the entire pending-invites section (SDD §6.3): when
+ * false the console renders byte-for-byte as it did before this feature
+ * existed. `demoCodes` maps a pending invite's SiteRole id to its single-use
+ * accept code, and is only consulted when `demoMode` is true.
+ */
+export function renderAdminConsole(
+  sites: SiteWithBathrooms[],
+  csrfToken: string,
+  demoMode = false,
+  demoCodes: ReadonlyMap<string, string> = new Map(),
+): string {
   const sitesHtml =
     sites.length === 0
       ? '<p class="muted-note">No sites yet. Create one to begin onboarding.</p>'
-      : sites.map(renderSite).join('');
+      : sites.map((entry) => renderSite(entry, demoMode, demoCodes)).join('');
   const bodyHtml = `
       <header class="page-header">
         <h1>Company Admin</h1>
