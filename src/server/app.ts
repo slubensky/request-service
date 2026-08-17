@@ -12,6 +12,7 @@ import { registerPublicRoutes } from '../public/routes.js';
 import { registerDemoRoutes, isDemoAcceptSubmission } from '../demo/routes.js';
 import { passesCsrf } from '../auth/guard.js';
 import type { AuthRuntime } from '../auth/config.js';
+import { MockPaymentGateway } from '../payments/gateway.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(currentDir, '../../public');
@@ -30,9 +31,13 @@ function buildRouter(runtime: AuthRuntime): Router {
   });
 
   registerAuthRoutes(router, runtime);
-  registerAdminRoutes(router, runtime);
+  // One mocked payment gateway instance shared by both routes so a capture/
+  // cancel observes the same in-process gateway an authorize went through
+  // (SDD §9.3) -- not Stripe; see src/payments/gateway.ts.
+  const paymentGateway = new MockPaymentGateway();
+  registerAdminRoutes(router, runtime, paymentGateway);
   registerManagerRoutes(router, runtime);
-  registerPublicRoutes(router, runtime);
+  registerPublicRoutes(router, runtime, undefined, paymentGateway);
   // Demo invite-code acceptance (SDD §6.3): registers nothing unless DEMO_MODE is on.
   registerDemoRoutes(router, runtime);
 

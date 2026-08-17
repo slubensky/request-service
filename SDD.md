@@ -10,6 +10,21 @@
 >
 > **Last edited:** 2026-08-14 18:00 UTC — Phase 1, Manager invitation flow: documented the HTTP surface (§11.4) an authorized Site Manager uses to invite additional members (manager or assistant) to their own site, generalizing the Company Admin's initial-manager invite. Clarified §2 that a Manager also invites/promotes/revokes additional managers, not only assistants. No new capability, role, or migration — this reuses the `invite_site_role` / `site_role:invite` matrix entry (§7) and the existing SiteRole schema (§4) unchanged. Per AGENTS.md spec policy, edit date/time recorded here.
 >
+> **Last edited:** 2026-08-17 18:00 UTC — Phase 2 (mocked payment gateway): documented the
+> "authorize now" implementation (new §9.3) -- a `PaymentGateway` interface with an
+> in-memory `MockPaymentGateway` standing in for Stripe's manual-capture PaymentIntent
+> semantics (explicitly **not** Stripe; no live keys, no card collection, no real money
+> movement under any configuration), plus the concrete HTTP surface for an authorized
+> Manager/Assistant to place a hold and a Company Admin to capture/cancel it (§11.6).
+> Amends §11.2/§11.3's "no oracle" wording to scope it precisely: the neutral page stays
+> byte-for-byte unchanged for any caller **without** authorized site authority at the
+> resolved site (public, customer, pending assistant, wrong-site manager); a caller who
+> already holds that authority legitimately sees a different, price-confirmation response
+> for their own site's QR, matching why a manager can replace a QR at all (§5). No role,
+> capability-matrix, or schema change -- `create_cleaning_request`, `capture_payment`, and
+> `cancel_payment` were already fully specified in §7/§9 and are wired to routes for the
+> first time here. Per AGENTS.md spec policy, edit date/time recorded here.
+>
 > **Status:** Approved for Phase 0 build; Phase 1 manager invitation flow in review. Source of truth for coders; mirrors the reviewed Blueprint (`art_RUHUe0PF`, v0.3).
 
 ## 1. Purpose & scope
@@ -288,6 +303,37 @@ The payment authorization lifecycle is the heart of the system: **authorize a ho
 - **Idempotency keys** on all PaymentIntent creation calls prevent duplicate holds from client retries or network errors.
 - **Capture/cancel is Company-Admin/internal-backend only.** A Site Manager may authorize a hold at their site but can never capture or cancel a PaymentAuthorization; only `platform_role=company_admin` (interactively or via internal backend logic) may do so.
 
+### 9.3 Phase 2 implementation: mocked payment gateway
+
+Phase 2 implements the "authorize now" half of §9.1 (steps 1-3) against a `PaymentGateway`
+interface, **not** the real Stripe SDK. This is a deliberate, explicit scope decision for
+this phase (and Phase 3): no Stripe dependency, no live keys, no Payment Element, no real
+card collection, and consequently no possibility of a real charge under any configuration.
+
+- **`PaymentGateway` interface** (`src/payments/gateway.ts`): `authorize({amountCents,
+idempotencyKey}) -> {gatewayId}`, `capture(gatewayId)`, `cancel(gatewayId)`. A future
+  `StripeGateway` implements the same interface with no call-site changes elsewhere in the
+  app — this is the seam Stripe integration lands behind, not a temporary shortcut that
+  gets threaded through every call site again later.
+- **`MockPaymentGateway`** always succeeds on `authorize` (there is nothing that could
+  decline — no real card is ever collected in this phase) and returns an id prefixed
+  `mock_pi_` so it can never be mistaken for a real Stripe id (`pi_...`) in logs, tests, or
+  the admin console. `capture`/`cancel` are no-ops on the gateway side; the system's own
+  `PaymentAuthorization.status` — checked before the gateway is ever called — is what
+  actually prevents an invalid transition (e.g. capturing an already-canceled hold),
+  exactly as it will once a real gateway replaces this one.
+- **Price and authorization ordering are unchanged from §7/§8/§9.1**: the amount used is
+  read from `Site.fixed_price_cents` server-side, the `create_cleaning_request` /
+  `capture_payment` / `cancel_payment` capability check runs before any gateway call or
+  write, and a failed authorization (not reachable via the mock today, but preserved as a
+  contract for the real gateway) still creates neither a `CleaningRequest` nor a
+  `PaymentAuthorization` row.
+- **Not implemented in this phase**: automatic expiry-to-void (inherently
+  webhook/scheduler-driven against a real Stripe integration — §9.1 step 4's alerting is
+  deferred with it) and Stripe webhook processing (§9.2's verified-webhook invariant applies
+  once a real gateway exists; there is no webhook surface to secure yet because there is no
+  external payment processor in this phase).
+
 ## 10. Assistant one-time approval
 
 An assistant with a **pending** SiteRole cannot self-authorize a paid request. Instead:
@@ -313,10 +359,14 @@ Only a Company Admin can perform steps 1–4; no Site, Bathroom, QRToken, or pri
 
 ### 11.2 Public visitor flow
 
-- A visitor scan (no SiteRole, whether anonymous or authenticated) always resolves to a **generic, neutral page**: "Need this restroom cleaned? Notify staff."
+- A visitor scan by anyone **without authorized site authority at the resolved site** —
+  whether anonymous, authenticated with no SiteRole, a not-yet-authorized (`pending`)
+  assistant, or a manager/assistant authorized at a _different_ site — always resolves to a
+  **generic, neutral page**: "Need this restroom cleaned? Notify staff."
 - This page **never reveals**: price, billing status, manager identity, request queue, or history.
 - The visitor may optionally submit a **non-billable `PublicAlert`** — this never creates a PaymentIntent, a CleaningRequest, or any payment obligation.
 - **Pre-activation privacy:** if a Site has not yet had a manager activate it, a scan still shows the same neutral page — it does not disclose that the site lacks a manager, which would otherwise leak operational state to an unauthenticated visitor.
+- **Authorized callers see more, deliberately.** A caller who already holds an authorized `manager`/`assistant` SiteRole at the resolved site — the _only_ case this applies to — sees the price-confirmation flow (§9.3, §11.6) instead. This is not a weakening of the invariant above: it requires authority the matrix (§7) already grants independent of the QR, the same authority that already lets a manager replace the QR at their own site (§5). Nothing is revealed to anyone who lacks that authority.
 
 ### 11.3 Phase 0 HTTP surface (implementation)
 
@@ -327,7 +377,7 @@ The Phase 0 vertical slice realizes the flows above with these routes; all autho
 - `POST /admin/sites/:siteId/bathrooms` — add a Bathroom to a Site (gated on `bathroom:create`).
 - `POST /admin/sites/:siteId/bathrooms/:bathroomId/qr` — issue a fresh opaque QRToken, revoking any prior active token for that Bathroom (gated on `qr_token:issue`). The raw token is rendered once into an inline SVG QR encoding the public scan URL; only its one-way hash is persisted (§5).
 - `POST /admin/sites/:siteId/managers` — invite the initial Site Manager by phone, creating a pending `role=manager` SiteRole (gated on `site_role:invite_initial_manager`; §3.3).
-- `GET /s/:token` — public scan resolution. Rate-limited hash lookup (§5), then a neutral "see staff" page (§11.2). The response is byte-for-byte identical whether the token is active, revoked, or unknown, and whether or not the Site has an activated manager — no oracle. It creates no PaymentIntent and writes no data.
+- `GET /s/:token` — public scan resolution. Rate-limited hash lookup (§5), then a neutral "see staff" page (§11.2) **for any caller without authorized site authority at the resolved site**. For that population the response is byte-for-byte identical whether the token is active, revoked, or unknown, whether or not the Site has an activated manager, and whether or not the caller is authenticated — no oracle. It creates no PaymentIntent and writes no data. (An authorized Manager/Assistant at the resolved site instead sees the price-confirmation flow — §9.3, §11.6; that population is the sole, deliberate exception, per §11.2.)
 
 All onboarding `POST`s are state-changing and therefore require the existing session-bound CSRF token (§ CSRF guard); the Company Admin console submits them via a small progressive-enhancement ES module that echoes the token in the `x-csrf-token` header. The public scan page loads no such requirement and ships ~0 KB JS.
 
@@ -381,6 +431,38 @@ Hosted UI redirect pattern of `GET /auth/login` (§6.1) and the factor-shared
   deliberately not routed through the capability matrix (§7), which governs site/platform
   authority; no role is branched on.
 
+### 11.6 Phase 2 HTTP surface — cleaning request + payment authorization (implementation)
+
+Realizes §9.1 steps 1-3 and §9.3's mocked gateway. All authorization is re-derived
+server-side through the deny-by-default matrix (§7); the amount is always server-derived
+(§8); nothing here is a new capability or role.
+
+- `GET /s/:token` (amended) — as §11.3, with one addition: if the caller has a valid
+  session **and** an authorized `manager`/`assistant` SiteRole at the resolved site **and**
+  the site's current price is within their `max_authorization_cents`, the response is a
+  price-confirmation page (site name, exact fixed price, an authorize form) instead of the
+  neutral page. Anyone else gets the unchanged, byte-identical neutral page (§11.2).
+- `POST /s/:token/authorize` — requires an authenticated session (`401` otherwise);
+  re-resolves the token and the site's current price server-side, then gates on
+  `create_cleaning_request` (siteId, bathroomId, that server-derived amount) via the
+  matrix. On success, creates the hold via the gateway (§9.3) and, only once it succeeds,
+  the `CleaningRequest` (`status=authorized`) and `PaymentAuthorization`
+  (`status=requires_capture`) rows, then renders a confirmation page. State-changing, so it
+  requires the same session-bound CSRF token as every other console mutation (§11.3).
+- `GET /admin/payments` — Company-Admin-only (`payment:view`-equivalent platform access;
+  gated the same way onboarding is, on `platform_role=company_admin`) listing of every
+  outstanding (`requires_capture`) `PaymentAuthorization` with its `CleaningRequest`.
+- `POST /admin/payments/:id/capture`, `POST /admin/payments/:id/cancel` — gated on
+  `capture_payment` / `cancel_payment` respectively, scoped to the target request's site
+  (resolved server-side from `:id`, never a client-supplied site claim). Rejects with `409`
+  if the authorization is not currently `requires_capture` (e.g. already captured/canceled)
+  before ever calling the gateway. Both are state-changing and CSRF-protected like every
+  other admin mutation.
+
+`price_version` is recorded as `1` for every request created in this phase — there is no
+price-history mechanism yet (`price:manage`, §7, remains specified but unwired to a route,
+as already noted for other not-yet-built capabilities). Revisit once price editing ships.
+
 ## 12. Security invariants
 
 | Invariant                      | Statement                                                                                                                                                                                                                                                         |
@@ -402,7 +484,7 @@ These decisions are locked pending final sign-off on the Blueprint (`art_RUHUe0P
 - **Deploy:** AWS via Terraform — App Runner (SSR), RDS/Aurora Serverless v2 PostgreSQL, Secrets Manager, ACM + Route 53, region `us-east-1`.
 - **Auth:** Amazon Cognito managed passwordless — SMS OTP + passkeys, via Cognito managed login (Hosted UI). Cognito owns authentication; the application server owns authorization (SiteRole).
 - **Identity vs. authority:** customer = no SiteRole; assistant/manager = manager-created SiteRole (pending/authorized); Company Admin = platform-level `platform_role=company_admin`, provisioned internally/seeded (or granted by an existing Company Admin), never via self-service, QR, or Cognito login. No self-service elevation to any of these (§3).
-- **Payments:** Stripe manual-capture PaymentIntents with idempotency keys; capture/cancel is Company-Admin/internal-backend only; server-derived price (§8, §9).
+- **Payments:** Stripe manual-capture PaymentIntents with idempotency keys; capture/cancel is Company-Admin/internal-backend only; server-derived price (§8, §9). **Phase 2/3 implement this against a mocked `PaymentGateway` (§9.3) — no Stripe SDK, no live keys, no real card collection or money movement — with the real Stripe integration tracked as a later, separate task behind the same interface.**
 - **Database:** Aurora Serverless v2 PostgreSQL with Drizzle ORM for typed, parameterized queries and migrations.
 - **Public alerts:** neutral "see staff" page only for MVP (§11).
 - **Delivery:** build and host in the sandbox first; PR into `main` and AWS deploy only after human review, per the Blueprint's sandbox-first build plan.
@@ -417,6 +499,24 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #005 — 2026-08-17T14:00:00-04:00
+
+Adds §9.3 (Phase 2: mocked payment gateway) and §11.6 (its HTTP surface): an authorized
+Manager/Assistant scanning a bathroom's QR while signed in now sees the server-derived
+fixed price and can place a hold (`POST /s/:token/authorize`), and a Company Admin can
+capture or cancel it (`GET /admin/payments`, `POST /admin/payments/:id/capture|cancel`).
+The hold goes through a new `PaymentGateway` interface (`src/payments/gateway.ts`) with an
+in-memory `MockPaymentGateway` implementation standing in for Stripe's manual-capture
+PaymentIntent semantics — explicitly **not** Stripe: no SDK, no live keys, no card
+collection, no possibility of real money movement in this phase. A real `StripeGateway` is
+a later, separate task landing behind the same interface. Amends §11.2/§11.3's "no oracle"
+language to scope it precisely to callers without authorized site authority at the resolved
+site — the neutral page is unchanged for everyone else, and only a caller who already holds
+matrix-granted authority at that site sees the confirmation flow instead, matching why a
+manager can already replace that site's QR (§5). No role, capability, or schema change:
+`create_cleaning_request`, `capture_payment`, and `cancel_payment` were already fully
+specified in §7/§9 and are wired to routes for the first time here.
 
 ### #004 — 2026-08-16T16:20:14-04:00
 
