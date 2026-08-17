@@ -110,6 +110,38 @@ The same bridge bootstraps the very first Manager for a new Site: a **Company Ad
 
 A token whose verified identifier matches no pending invite links nothing and grants nothing — deny-by-default (§7) is unchanged, and Company Admin (`platform_role`) authority is orthogonal and untouched. The operation is **idempotent**: repeat authentication re-matches only still-unlinked pending invites, so an already-activated Manager role or an already-linked Assistant role is left exactly as it was. All authority continues to be re-derived from the SiteRole matrix (§7) on every request — activation grants authority only because the resolved role is now `authorized`, never through any parallel code path.
 
+**Resilient bridge contract (added 2026-08-16, PR-D).** The unique index
+`site_roles_site_user_key` on `(site_id, user_id)` permits at most one SiteRole per user
+per site, so the bridge must never attempt to write the same `user_id` onto more than one
+row at a given site in a single pass — even when duplicate pending invites exist for the
+same phone (e.g. a manager re-invites a phone, or two managers independently invite the
+same phone to one site). `bridgePendingSiteRoles` enforces this as follows:
+
+- **At most one role per (user, site).** Matching pending invites for the verified phone
+  are grouped by `site_id` before any write; each site yields at most one
+  activated/linked row per bridge call.
+- **Deterministic pick, graceful supersession.** When more than one pending invite
+  matches the same phone at a site, the earliest-created match (`created_at` ascending,
+  `id` ascending on tie) is the one activated/linked per steps 1–2 above; every other
+  matching row at that site is marked `status=revoked` (superseded) rather than left
+  dangling `pending` or written with a colliding `user_id`. A superseded duplicate confers
+  no authority and can never be redeemed again.
+- **Already-has-a-role no-ops.** If the resolved user already holds a SiteRole (any
+  status) at a site that also has matching pending invites, the bridge leaves that
+  existing role untouched and only supersedes the pending duplicates — no insert, no
+  update collision, no error. The caller sees zero newly-bridged rows for that site and
+  can render a friendly "already a member" outcome instead of surfacing a failure.
+- **No unhandled 500 on a race.** The activating write is a single conditional
+  `UPDATE ... WHERE id = ? AND user_id IS NULL AND status = 'pending'`, so a concurrent
+  bridge call touching the same row is a no-op, not a conflict. As defense in depth
+  against any remaining race, a Postgres unique-violation (`23505`) surfaced during
+  activation is caught and treated as "another call already won this site" instead of
+  propagating as an unhandled error.
+
+This is a resilience change only: the single-invite happy path (one pending invite per
+phone per site) is byte-for-byte unchanged in behavior — same row activated/linked, same
+returned shape, same idempotency on repeat authentication.
+
 ## 4. Data model
 
 All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Payment fields are references only — the system never stores raw card data. Identity is anchored to a Cognito subject, never to a password.
@@ -275,7 +307,7 @@ A new Site enters the system only through a Company Admin, in this order:
 2. **Create its Bathrooms**.
 3. **Issue a QRToken** for each Bathroom (§5).
 4. **Set the fixed price** (`fixed_price_cents`, establishing the first `price_version`; §8).
-5. **Invite the initial Manager** by identifier, creating a pending `role=manager` SiteRole (§3.3) — the invitee becomes an active Manager once they authenticate through Cognito and the bridge links their identity.
+5. **Invite the initial Manager** by identifier, creating a pending `role=manager` SiteRole (§3.3) — the invitee becomes an active Manager once they authenticate through Cognito and the bridge links their identity. Idempotent like the Site Manager invitation flow (§11.4): a repeat invite of the same not-yet-linked phone at the same Site returns the existing pending record rather than inserting a duplicate row, so the §3.3 bridge never faces two pending invites for the same phone+site+role from this path.
 
 Only a Company Admin can perform steps 1–4; no Site, Bathroom, QRToken, or price can exist without one. Step 5 is the last Company Admin action required before the Site is operable — all subsequent day-to-day requesting, hold authorization, and assistant management happen under the Manager's own SiteRole.
 
@@ -385,6 +417,24 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #004 — 2026-08-16T16:20:14-04:00
+
+Hardens the §3.3 invite bridge against duplicate pending invites for the same
+phone+site: `bridgePendingSiteRoles` (`src/db/access.ts`) now groups matching pending
+invites by `site_id`, activates/links only the earliest-created match per site, and
+marks any remaining duplicates `status=revoked` (superseded) instead of attempting to
+write the same `user_id` onto more than one row -- the write that previously violated
+the `site_roles_site_user_key` unique index and surfaced as an unhandled HTTP 500 (see
+Bug: redeeming an invite 500s when more than one pending invite exists for the same
+phone on the same site). Also adds a guard for a user who already holds a SiteRole at
+the site (graceful no-op, no duplicate write) and a defensive catch of Postgres
+unique-violation (`23505`) around the activating write so a residual race can never
+escape as a 500. Closes the duplicate-creation gap at the source: `inviteInitialManager`
+(`src/admin/service.ts`, §11.1) is now idempotent for an existing not-yet-linked
+pending phone+site+role, matching the idempotency `inviteSiteMember` (§11.4) already
+had. The single-invite happy path is behaviorally unchanged. See §3.3's new "Resilient
+bridge contract" and the amended §11.1 step 5.
 
 ### #003 — 2026-08-16T13:33:21-04:00
 

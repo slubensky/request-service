@@ -178,3 +178,28 @@ test('inviteInitialManager creates a pending manager role bound to a phone, no u
     await client.close();
   }
 });
+
+test('inviteInitialManager is idempotent for a repeat invite of the same not-yet-linked phone at the same site (SDD §11.1)', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const siteId = await seedSite(db);
+
+    const first = await inviteInitialManager(db, siteId, '+15555550100');
+    const second = await inviteInitialManager(db, siteId, '+15555550100');
+    assert.equal(first.id, second.id);
+
+    const rows = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+    assert.equal(rows.length, 1, 'no duplicate pending row is inserted');
+
+    // A different phone, or the same phone at a different site, is a genuinely
+    // new invite and gets its own row.
+    const otherPhone = await inviteInitialManager(db, siteId, '+15555550101');
+    assert.notEqual(otherPhone.id, first.id);
+
+    const otherSiteId = await seedSite(db);
+    const otherSite = await inviteInitialManager(db, otherSiteId, '+15555550100');
+    assert.notEqual(otherSite.id, first.id);
+  } finally {
+    await client.close();
+  }
+});

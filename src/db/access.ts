@@ -7,10 +7,28 @@
  * are parameterized through Drizzle and scoped by the authenticated user id and
  * the target site id -- never by a client-supplied role claim.
  */
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import type { PlatformRole, Principal, ResolvedSiteRole } from '../auth/authorize.js';
 import type { AppDatabase } from './client.js';
 import { siteRoles, users, type SiteRoleRow, type UserRow } from './schema.js';
+
+// The exact transaction-bound handle `db.transaction()` hands its callback --
+// derived structurally so it always matches the installed drizzle-orm version
+// rather than being hand-maintained against `PgTransaction`'s generics.
+type SiteRoleTx = Parameters<Parameters<AppDatabase['transaction']>[0]>[0];
+
+// Postgres SQLSTATE for a unique-constraint violation. `site_roles_site_user_key`
+// (site_id, user_id) is the constraint the bridge must never surface as a 500 (§3.3).
+const UNIQUE_VIOLATION = '23505';
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === UNIQUE_VIOLATION
+  );
+}
 
 /**
  * Resolves the authenticated user's authority at a site, or null when they
@@ -126,6 +144,17 @@ export async function findOrCreateUserByCognitoSub(
  * Grants no authority itself: every request still re-derives authority from the
  * SiteRole matrix (authorize.ts), which denies any non-`authorized` role. A
  * null/absent verified phone, or one matching no pending invite, links nothing.
+ *
+ * Resilient to duplicate pending invites (SDD §3.3, "Resilient bridge
+ * contract"): matches are grouped by site, and at most one is activated/linked
+ * per site -- the unique `(site_id, user_id)` index allows nothing else. When
+ * more than one pending invite matches the same phone at a site, the
+ * earliest-created is the winner and the rest are superseded (`status=
+ * revoked`), never left dangling `pending` or written with a colliding
+ * `user_id`. If `userId` already holds a role at a matching site, that site's
+ * matches are all superseded and nothing is written to the existing role
+ * (graceful no-op). A residual unique-violation race during activation is
+ * caught rather than left to surface as an unhandled 500.
  */
 export async function bridgePendingSiteRoles(
   db: AppDatabase,
@@ -136,31 +165,149 @@ export async function bridgePendingSiteRoles(
     return [];
   }
 
-  const activatedManagers = await db
-    .update(siteRoles)
-    .set({ userId, status: 'authorized' })
+  // All not-yet-linked pending invites for this phone, across both roles --
+  // ordered so the grouping below picks a stable winner per site regardless of
+  // how many duplicates exist or which role each one is.
+  const pending = await db
+    .select()
+    .from(siteRoles)
     .where(
       and(
         eq(siteRoles.invitedPhone, verifiedPhone),
         isNull(siteRoles.userId),
         eq(siteRoles.status, 'pending'),
-        eq(siteRoles.role, 'manager'),
       ),
     )
-    .returning();
+    .orderBy(asc(siteRoles.createdAt), asc(siteRoles.id));
 
-  const linkedAssistants = await db
+  if (pending.length === 0) {
+    return [];
+  }
+
+  // The unique (site_id, user_id) index allows at most one role per user per
+  // site, so every matching invite must collapse to a single winner per site --
+  // grouping by role alone would miss a manager+assistant duplicate pair at the
+  // same site (SDD §3.3, "Resilient bridge contract").
+  const bySite = new Map<string, SiteRoleRow[]>();
+  for (const row of pending) {
+    const group = bySite.get(row.siteId);
+    if (group) {
+      group.push(row);
+    } else {
+      bySite.set(row.siteId, [row]);
+    }
+  }
+
+  const bridged: SiteRoleRow[] = [];
+  for (const group of bySite.values()) {
+    const result = await bridgeSiteGroup(db, userId, group);
+    if (result) {
+      bridged.push(result);
+    }
+  }
+  return bridged;
+}
+
+/**
+ * Resolves one site's worth of matching pending invites for a single bridge
+ * call: at most one is activated/linked for `userId`, and every other row in
+ * the group is superseded (`status=revoked`) so it can never be redeemed
+ * again. Runs in a transaction so the existing-role guard and the activating
+ * write are atomic against a concurrent bridge call for the same site.
+ */
+async function bridgeSiteGroup(
+  db: AppDatabase,
+  userId: string,
+  group: SiteRoleRow[],
+): Promise<SiteRoleRow | null> {
+  const siteId = group[0]?.siteId;
+  if (!siteId) {
+    return null;
+  }
+
+  return db.transaction(async (tx) => {
+    // Guard: the user may already hold a role at this site (granted directly,
+    // or linked by an earlier bridge call). Superseding leftover pending
+    // duplicates is always safe; writing a second role for the same user at
+    // the site is not -- no-op gracefully instead of colliding.
+    const [existingRole] = await tx
+      .select({ id: siteRoles.id })
+      .from(siteRoles)
+      .where(and(eq(siteRoles.siteId, siteId), eq(siteRoles.userId, userId)))
+      .limit(1);
+    if (existingRole) {
+      await supersedeDuplicates(
+        tx,
+        group.map((row) => row.id),
+      );
+      return null;
+    }
+
+    // `group` is ordered created_at/id ascending, so the head is the
+    // deterministic winner (earliest invite) and the rest are duplicates.
+    const [winner, ...duplicates] = group;
+    if (!winner) {
+      return null;
+    }
+    const activated = await activateWinner(tx, userId, winner);
+    await supersedeDuplicates(
+      tx,
+      duplicates.map((row) => row.id),
+    );
+    return activated;
+  });
+}
+
+/**
+ * Activates (`manager`) or links (`assistant`) the single winning pending
+ * invite for `userId`, mirroring the role-specific outcome in SDD §3.3. The
+ * conditional `WHERE` makes the write a no-op -- not a conflict -- if another
+ * call already claimed this exact row; a unique-violation from any residual
+ * race is caught defensively rather than left to surface as a 500.
+ */
+async function activateWinner(
+  tx: SiteRoleTx,
+  userId: string,
+  winner: SiteRoleRow,
+): Promise<SiteRoleRow | null> {
+  const nextStatus = winner.role === 'manager' ? ('authorized' as const) : ('pending' as const);
+  try {
+    const [row] = await tx
+      .update(siteRoles)
+      .set({ userId, status: nextStatus })
+      .where(
+        and(eq(siteRoles.id, winner.id), isNull(siteRoles.userId), eq(siteRoles.status, 'pending')),
+      )
+      .returning();
+    return row ?? null;
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      // Another concurrent bridge call already holds this site for this user;
+      // treat this call as a no-op rather than an unhandled error.
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Marks duplicate pending invites `revoked` (superseded) so they are left
+ * neither dangling `pending` nor pointed at a colliding `user_id`. Scoped to
+ * still-pending, still-unlinked rows so it is idempotent and never re-revokes
+ * or overwrites a row another path has since touched.
+ */
+async function supersedeDuplicates(tx: SiteRoleTx, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) {
+    return;
+  }
+  await tx
     .update(siteRoles)
-    .set({ userId })
+    .set({ status: 'revoked' })
     .where(
       and(
-        eq(siteRoles.invitedPhone, verifiedPhone),
+        inArray(siteRoles.id, [...ids]),
         isNull(siteRoles.userId),
         eq(siteRoles.status, 'pending'),
-        eq(siteRoles.role, 'assistant'),
       ),
-    )
-    .returning();
-
-  return [...activatedManagers, ...linkedAssistants];
+    );
 }
