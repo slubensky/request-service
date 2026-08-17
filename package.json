@@ -16,7 +16,8 @@
     "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude=test/** --test-coverage-exclude=scripts/** --test-coverage-lines=73 --test-coverage-branches=83 --test-coverage-functions=77 test/*.test.ts",
     "build": "node scripts/build.mjs",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx scripts/db-migrate.ts"
+    "db:migrate": "tsx scripts/db-migrate.ts",
+    "dev:login": "tsx scripts/dev-login.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.2.17",
