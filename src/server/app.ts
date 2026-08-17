@@ -45,12 +45,18 @@ function parseUrl(req: IncomingMessage): URL {
 }
 
 /**
- * Builds the request listener: static assets first, then routed handlers,
- * falling back to a plain 404. This is the single trust boundary for the
- * app -- every response is produced here, nowhere else.
+ * Builds the request listener for a given runtime: static assets first, then
+ * routed handlers, falling back to a plain 404. This is the single trust
+ * boundary for the app -- every response is produced here, nowhere else.
+ *
+ * Runtime is a parameter (not read from the environment internally) so tests
+ * can drive the *real* HTTP path -- including the CSRF gate below, which lives
+ * only in this closure -- against a PGlite-backed runtime, the same way
+ * `createApp()` drives it against the environment-sourced one.
  */
-export function createApp(): (req: IncomingMessage, res: ServerResponse) => void {
-  const runtime = getAuthRuntime();
+export function createAppForRuntime(
+  runtime: AuthRuntime,
+): (req: IncomingMessage, res: ServerResponse) => void {
   const router = buildRouter(runtime);
 
   return (req, res) => {
@@ -97,6 +103,12 @@ export function createApp(): (req: IncomingMessage, res: ServerResponse) => void
   };
 }
 
-export function createHttpServer(): Server {
-  return createServer(createApp());
+/** Builds the request listener from the environment-sourced runtime (production entry point). */
+export function createApp(): (req: IncomingMessage, res: ServerResponse) => void {
+  return createAppForRuntime(getAuthRuntime());
+}
+
+/** Optionally accepts a runtime override so tests can exercise the real HTTP path against PGlite. */
+export function createHttpServer(runtime?: AuthRuntime): Server {
+  return createServer(runtime ? createAppForRuntime(runtime) : createApp());
 }
