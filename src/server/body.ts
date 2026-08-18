@@ -1,10 +1,15 @@
 /**
  * Reads and parses an `application/x-www-form-urlencoded` request body.
  *
- * Security: the body is size-capped (default 16 KB) and the stream is destroyed
- * the moment the cap is exceeded, so a malicious client cannot exhaust memory
- * with an unbounded upload. Values are parsed with the standard
- * URLSearchParams -- no eval, no unsafe deserialization (AGENTS.md).
+ * Security: the body is size-capped (default 16 KB). Once the cap is exceeded,
+ * further chunks are dropped instead of buffered, so a malicious client cannot
+ * exhaust memory with an unbounded upload -- but the underlying socket is
+ * deliberately left open (not `req.destroy()`ed) so the caller can still write
+ * a clean 413 response. Destroying the request also destroys the socket the
+ * response would be written on, turning the size cap into an unexplained
+ * connection reset instead of an actionable error for the client. Values are
+ * parsed with the standard URLSearchParams -- no eval, no unsafe
+ * deserialization (AGENTS.md).
  */
 import type { IncomingMessage } from 'node:http';
 
@@ -23,18 +28,32 @@ function readRawBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let overLimit = false;
 
     req.on('data', (chunk: Buffer) => {
       total += chunk.length;
       if (total > maxBytes) {
-        req.destroy();
-        reject(new BodyTooLargeError());
+        // Bounded memory: stop buffering, but let the stream keep draining on
+        // the same socket so the caller can still write a response (413) --
+        // destroying the request here would destroy that socket too.
+        if (!overLimit) {
+          overLimit = true;
+          reject(new BodyTooLargeError());
+        }
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => {
+      if (!overLimit) {
+        resolve(Buffer.concat(chunks).toString('utf8'));
+      }
+    });
+    req.on('error', (error) => {
+      if (!overLimit) {
+        reject(error);
+      }
+    });
   });
 }
 

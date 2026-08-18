@@ -188,6 +188,23 @@ button {
   text-align: center;
 }
 
+.price {
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  margin: var(--space-2) 0;
+}
+
+.payment {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.payment .inline-form {
+  display: inline-block;
+  margin-right: var(--space-2);
+}
+
 .qr-image {
   max-width: 16rem;
   margin: 0 auto;

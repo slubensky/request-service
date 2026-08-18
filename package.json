@@ -5,7 +5,7 @@
   "description": "QR bathroom cleaning service request app: no-framework, no-bundler Lean SSR on Node.js",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.6.0"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -13,9 +13,11 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "tsx --test test/*.test.ts",
+    "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude=test/** --test-coverage-exclude=scripts/** --test-coverage-lines=73 --test-coverage-branches=83 --test-coverage-functions=77 test/*.test.ts",
     "build": "node scripts/build.mjs",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx scripts/db-migrate.ts"
+    "db:migrate": "tsx scripts/db-migrate.ts",
+    "dev:login": "tsx scripts/dev-login.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.2.17",

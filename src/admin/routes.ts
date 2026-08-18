@@ -37,10 +37,20 @@ import {
   type SiteWithBathrooms,
 } from './service.js';
 import { renderAdminConsole, renderQrIssued } from '../render/templates/admin.js';
+import { renderPaymentsConsole } from '../render/templates/payments.js';
 import { renderQrSvg } from '../qr/image.js';
 import { isDemoMode } from '../demo/config.js';
 import { issueDemoInviteCode, unusedCodesForSiteRoles } from '../demo/service.js';
 import type { AppDatabase } from '../db/client.js';
+import {
+  cancelCleaningRequest,
+  captureCleaningRequest,
+  InvalidPaymentStateError,
+  listPendingCaptures,
+  loadPaymentAuthorization,
+  PaymentAuthorizationNotFoundError,
+} from '../payments/service.js';
+import { MockPaymentGateway, type PaymentGateway } from '../payments/gateway.js';
 
 /** Parses and validates the create-site form. Nothing here is trusted unvalidated. */
 function parseCreateSiteInput(fields: Record<string, string>): ParseResult<CreateSiteInput> {
@@ -223,6 +233,83 @@ async function handleInviteManager(runtime: AuthRuntime, ctx: RouteContext): Pro
   ctx.res.writeHead(204).end();
 }
 
+async function handleListPayments(runtime: AuthRuntime, ctx: RouteContext): Promise<void> {
+  const { req, res } = ctx;
+  const session = readSession(req, runtime);
+  if (!session) {
+    res.writeHead(302, { Location: '/auth/login' });
+    res.end();
+    return;
+  }
+  const db = runtime.connection?.db;
+  const secret = runtime.sessionSecret;
+  if (!db || !secret) {
+    sendText(res, 503, 'Payments are not configured');
+    return;
+  }
+  // Same site-less platform gate the admin console itself uses (`create_site`):
+  // viewing outstanding holds is Company-Admin-only and cross-site (§9.1, §11.6).
+  // `capture_payment`'s Action type requires a real siteId, so it is deliberately
+  // not reused here for a site-less "list everything" view.
+  const decision = await authorizeAction(db, session.userId, { type: 'create_site' });
+  if (!decision.allowed) {
+    sendText(res, 403, 'Forbidden');
+    return;
+  }
+  const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
+  const csrfToken = csrfTokenForSession(sessionToken, secret);
+  const pending = await listPendingCaptures(db);
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(renderPaymentsConsole(pending, csrfToken));
+}
+
+/**
+ * Shared capture/cancel handler builder: resolves the target's site id
+ * read-only (never a client-supplied claim) so the authorization gate runs
+ * against the real site before any mutation, per §7.
+ */
+function registerCaptureOrCancel(
+  router: Router,
+  runtime: AuthRuntime,
+  gateway: PaymentGateway,
+  path: string,
+  actionType: 'capture_payment' | 'cancel_payment',
+  mutate: (db: AppDatabase, gateway: PaymentGateway, id: string) => Promise<void>,
+): void {
+  router.post(path, (ctx) =>
+    withBodyLimit(async (rt, c) => {
+      const id = c.params.id ?? '';
+      const db = rt.connection?.db;
+      if (!db) {
+        sendText(c.res, 503, 'Payments are not configured');
+        return;
+      }
+      let siteId: string;
+      try {
+        siteId = (await loadPaymentAuthorization(db, id)).request.siteId;
+      } catch (error) {
+        if (error instanceof PaymentAuthorizationNotFoundError) {
+          sendText(c.res, 404, 'Payment authorization not found');
+          return;
+        }
+        throw error;
+      }
+      const gate = await authorizeOrReject(rt, c, { type: actionType, siteId });
+      if (!gate) return;
+      try {
+        await mutate(gate.db, gateway, id);
+      } catch (error) {
+        if (error instanceof InvalidPaymentStateError) {
+          sendText(c.res, 409, error.message);
+          return;
+        }
+        throw error;
+      }
+      c.res.writeHead(204).end();
+    })(runtime, ctx),
+  );
+}
+
 /** Wraps a POST handler to translate an over-cap body into a clean 413. */
 function withBodyLimit(
   handler: (runtime: AuthRuntime, ctx: RouteContext) => Promise<void>,
@@ -240,8 +327,17 @@ function withBodyLimit(
   };
 }
 
-/** Registers the Company-Admin console and onboarding endpoints. */
-export function registerAdminRoutes(router: Router, runtime: AuthRuntime): void {
+/**
+ * Registers the Company-Admin console, onboarding, and payment
+ * capture/cancel endpoints (SDD §11.6). The payment gateway is injectable so
+ * tests can share one instance with the public authorize route (SDD §9.3);
+ * production uses a fresh MockPaymentGateway.
+ */
+export function registerAdminRoutes(
+  router: Router,
+  runtime: AuthRuntime,
+  gateway: PaymentGateway = new MockPaymentGateway(),
+): void {
   router.get('/admin', (ctx) => handleConsole(runtime, ctx));
   router.post('/admin/sites', (ctx) => withBodyLimit(handleCreateSite)(runtime, ctx));
   router.post('/admin/sites/:siteId/bathrooms', (ctx) =>
@@ -252,5 +348,22 @@ export function registerAdminRoutes(router: Router, runtime: AuthRuntime): void 
   );
   router.post('/admin/sites/:siteId/managers', (ctx) =>
     withBodyLimit(handleInviteManager)(runtime, ctx),
+  );
+  router.get('/admin/payments', (ctx) => handleListPayments(runtime, ctx));
+  registerCaptureOrCancel(
+    router,
+    runtime,
+    gateway,
+    '/admin/payments/:id/capture',
+    'capture_payment',
+    captureCleaningRequest,
+  );
+  registerCaptureOrCancel(
+    router,
+    runtime,
+    gateway,
+    '/admin/payments/:id/cancel',
+    'cancel_payment',
+    cancelCleaningRequest,
   );
 }

@@ -12,6 +12,7 @@ import { registerPublicRoutes } from '../public/routes.js';
 import { registerDemoRoutes, isDemoAcceptSubmission } from '../demo/routes.js';
 import { passesCsrf } from '../auth/guard.js';
 import type { AuthRuntime } from '../auth/config.js';
+import { MockPaymentGateway } from '../payments/gateway.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(currentDir, '../../public');
@@ -30,9 +31,13 @@ function buildRouter(runtime: AuthRuntime): Router {
   });
 
   registerAuthRoutes(router, runtime);
-  registerAdminRoutes(router, runtime);
+  // One mocked payment gateway instance shared by both routes so a capture/
+  // cancel observes the same in-process gateway an authorize went through
+  // (SDD §9.3) -- not Stripe; see src/payments/gateway.ts.
+  const paymentGateway = new MockPaymentGateway();
+  registerAdminRoutes(router, runtime, paymentGateway);
   registerManagerRoutes(router, runtime);
-  registerPublicRoutes(router, runtime);
+  registerPublicRoutes(router, runtime, undefined, paymentGateway);
   // Demo invite-code acceptance (SDD §6.3): registers nothing unless DEMO_MODE is on.
   registerDemoRoutes(router, runtime);
 
@@ -45,12 +50,18 @@ function parseUrl(req: IncomingMessage): URL {
 }
 
 /**
- * Builds the request listener: static assets first, then routed handlers,
- * falling back to a plain 404. This is the single trust boundary for the
- * app -- every response is produced here, nowhere else.
+ * Builds the request listener for a given runtime: static assets first, then
+ * routed handlers, falling back to a plain 404. This is the single trust
+ * boundary for the app -- every response is produced here, nowhere else.
+ *
+ * Runtime is a parameter (not read from the environment internally) so tests
+ * can drive the *real* HTTP path -- including the CSRF gate below, which lives
+ * only in this closure -- against a PGlite-backed runtime, the same way
+ * `createApp()` drives it against the environment-sourced one.
  */
-export function createApp(): (req: IncomingMessage, res: ServerResponse) => void {
-  const runtime = getAuthRuntime();
+export function createAppForRuntime(
+  runtime: AuthRuntime,
+): (req: IncomingMessage, res: ServerResponse) => void {
   const router = buildRouter(runtime);
 
   return (req, res) => {
@@ -97,6 +108,12 @@ export function createApp(): (req: IncomingMessage, res: ServerResponse) => void
   };
 }
 
-export function createHttpServer(): Server {
-  return createServer(createApp());
+/** Builds the request listener from the environment-sourced runtime (production entry point). */
+export function createApp(): (req: IncomingMessage, res: ServerResponse) => void {
+  return createAppForRuntime(getAuthRuntime());
+}
+
+/** Optionally accepts a runtime override so tests can exercise the real HTTP path against PGlite. */
+export function createHttpServer(runtime?: AuthRuntime): Server {
+  return createServer(runtime ? createAppForRuntime(runtime) : createApp());
 }
