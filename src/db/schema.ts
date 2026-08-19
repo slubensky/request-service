@@ -11,7 +11,7 @@
  * All access goes through Drizzle's typed, parameterized query builder; no raw
  * string SQL is constructed from untrusted input anywhere in the app.
  */
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   integer,
   jsonb,
@@ -128,23 +128,34 @@ export const siteRoles = pgTable(
   (table) => [uniqueIndex('site_roles_site_user_key').on(table.siteId, table.userId)],
 );
 
-export const cleaningRequests = pgTable('cleaning_requests', {
-  id: id(),
-  siteId: uuid('site_id')
-    .notNull()
-    .references(() => sites.id, { onDelete: 'cascade' }),
-  bathroomId: uuid('bathroom_id')
-    .notNull()
-    .references(() => bathrooms.id, { onDelete: 'cascade' }),
-  requestedByUserId: uuid('requested_by_user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'restrict' }),
-  // Server-derived price snapshot so later Site price changes cannot alter it (SDD §4.1, §8).
-  priceVersion: integer('price_version').notNull(),
-  amountCents: integer('amount_cents').notNull(),
-  status: cleaningRequestStatus('status').notNull().default('authorizing'),
-  createdAt: createdAt(),
-});
+export const cleaningRequests = pgTable(
+  'cleaning_requests',
+  {
+    id: id(),
+    siteId: uuid('site_id')
+      .notNull()
+      .references(() => sites.id, { onDelete: 'cascade' }),
+    bathroomId: uuid('bathroom_id')
+      .notNull()
+      .references(() => bathrooms.id, { onDelete: 'cascade' }),
+    requestedByUserId: uuid('requested_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    // Server-derived price snapshot so later Site price changes cannot alter it (SDD §4.1, §8).
+    priceVersion: integer('price_version').notNull(),
+    amountCents: integer('amount_cents').notNull(),
+    status: cleaningRequestStatus('status').notNull().default('authorizing'),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    // Duplicate-active-request guard backstop (SDD §9.4): at most one non-terminal
+    // request per bathroom. The app checks this before any gateway call; this partial
+    // unique index makes a true double-tap race impossible to write twice.
+    uniqueIndex('cleaning_requests_bathroom_active_key')
+      .on(table.bathroomId)
+      .where(sql`${table.status} IN ('authorizing', 'authorized')`),
+  ],
+);
 
 export const paymentAuthorizations = pgTable(
   'payment_authorizations',
@@ -163,6 +174,29 @@ export const paymentAuthorizations = pgTable(
     uniqueIndex('payment_auth_request_key').on(table.requestId),
     uniqueIndex('payment_auth_intent_key').on(table.stripePaymentIntentId),
   ],
+);
+
+// Mock-only saved payment method (SDD §9.4). Belongs to the Site, not the User who added
+// it -- see docs/phase3-saved-payment-method-plan.md for the rationale. At most one per
+// Site in this phase (unique on site_id). `displayLabel` is always a fixed mock string
+// (e.g. "Mock Visa •••• 4242"), never a real-looking free-text PAN; `gatewayToken` is
+// prefixed `mock_pm_` so it can never be mistaken for a real Stripe payment-method id.
+export const sitePaymentMethods = pgTable(
+  'site_payment_methods',
+  {
+    id: id(),
+    siteId: uuid('site_id')
+      .notNull()
+      .references(() => sites.id, { onDelete: 'cascade' }),
+    gatewayToken: text('gateway_token').notNull(),
+    displayLabel: text('display_label').notNull(),
+    // Audit only -- does not change who the method belongs to (the Site) or who may use it.
+    createdByUserId: uuid('created_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    createdAt: createdAt(),
+  },
+  (table) => [uniqueIndex('site_payment_methods_site_key').on(table.siteId)],
 );
 
 export const assistantApprovalRequests = pgTable('assistant_approval_requests', {
@@ -239,6 +273,7 @@ export type UserRow = typeof users.$inferSelect;
 export type SiteRoleRow = typeof siteRoles.$inferSelect;
 export type CleaningRequestRow = typeof cleaningRequests.$inferSelect;
 export type PaymentAuthorizationRow = typeof paymentAuthorizations.$inferSelect;
+export type SitePaymentMethodRow = typeof sitePaymentMethods.$inferSelect;
 export type AssistantApprovalRequestRow = typeof assistantApprovalRequests.$inferSelect;
 export type PublicAlertRow = typeof publicAlerts.$inferSelect;
 export type DemoInviteCodeRow = typeof demoInviteCodes.$inferSelect;

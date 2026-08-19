@@ -27,6 +27,23 @@ export function readSession(req: IncomingMessage, runtime: AuthRuntime): Session
   return verifySession(token, runtime.sessionSecret, SESSION_MAX_AGE_SECONDS);
 }
 
+/**
+ * Step-up re-authentication check (SDD §6.4): whether the session was established (or
+ * re-established) by a full Cognito authentication within the last `windowSeconds`. A
+ * session's `iat` is stamped only by `/auth/callback`, shared across every auth factor
+ * (SMS OTP, passkey), so it is exactly "time of last authentication" -- no separate
+ * last-activity tracking exists or is needed. Used by actions that need proof of a *recent*
+ * authentication, not merely a still-unexpired session cookie (first consumer: reusing a
+ * saved payment method to place a new hold, SDD §9.4).
+ */
+export function sessionAuthenticatedWithin(
+  session: SessionPayload,
+  windowSeconds: number,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): boolean {
+  return nowSeconds - session.iat <= windowSeconds && session.iat <= nowSeconds;
+}
+
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }

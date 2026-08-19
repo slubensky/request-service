@@ -61,6 +61,7 @@ export type Capability =
   | 'ops:mark_completed'
   // Site-scoped (manager / assistant) capabilities.
   | 'cleaning_request:create'
+  | 'payment_method:save'
   | 'assistant_request:approve'
   | 'site_role:invite'
   | 'site_role:promote'
@@ -106,6 +107,7 @@ export type Action =
   | { type: 'mark_completed'; siteId: string }
   // Site-scoped (manager / assistant) actions.
   | { type: 'create_cleaning_request'; siteId: string; bathroomId: string; amountCents: number }
+  | { type: 'save_payment_method'; siteId: string }
   | { type: 'approve_assistant_request'; siteId: string }
   | { type: 'invite_site_role'; siteId: string }
   | { type: 'promote_site_role'; siteId: string }
@@ -137,6 +139,7 @@ const ACTION_CAPABILITY: Record<Action['type'], Capability> = {
   cancel_payment: 'payment:cancel',
   mark_completed: 'ops:mark_completed',
   create_cleaning_request: 'cleaning_request:create',
+  save_payment_method: 'payment_method:save',
   approve_assistant_request: 'assistant_request:approve',
   invite_site_role: 'site_role:invite',
   promote_site_role: 'site_role:promote',
@@ -177,6 +180,7 @@ const PLATFORM_CAPABILITIES: Record<PlatformRole, ReadonlySet<Capability>> = {
 const SITE_ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
   manager: new Set<Capability>([
     'cleaning_request:create',
+    'payment_method:save',
     'assistant_request:approve',
     'site_role:invite',
     'site_role:promote',
@@ -184,7 +188,10 @@ const SITE_ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
     'payment:view',
     'qr_token:replace',
   ]),
-  assistant: new Set<Capability>(['cleaning_request:create']),
+  // Same role set as cleaning_request:create (SDD §9.4) -- saving the site's mock payment
+  // method is tightly coupled to placing a hold, and an authorized assistant may already
+  // place holds, not just a manager.
+  assistant: new Set<Capability>(['cleaning_request:create', 'payment_method:save']),
 };
 
 function deny(reason: DenyReason): AuthorizationDecision {

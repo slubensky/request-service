@@ -22,21 +22,36 @@ import type { AppDatabase } from '../db/client.js';
 import { FixedWindowRateLimiter } from '../server/rate-limit.js';
 import { resolveActiveQrToken, type ResolvedQrTarget } from '../qr/tokens.js';
 import { renderPublicScanPage } from '../render/templates/public-scan.js';
-import { renderAuthorizedPage, renderConfirmPage } from '../render/templates/confirm.js';
-import { readSession } from '../auth/guard.js';
+import {
+  renderAddPaymentMethodPage,
+  renderAuthorizedPage,
+  renderConfirmPage,
+  renderReauthRequiredPage,
+} from '../render/templates/confirm.js';
+import { readSession, sessionAuthenticatedWithin } from '../auth/guard.js';
+import type { SessionPayload } from '../auth/session.js';
 import { authorizeAction } from '../auth/enforce.js';
 import { parseCookies } from '../auth/cookies.js';
 import { SESSION_COOKIE } from '../auth/routes.js';
 import { csrfTokenForSession } from '../auth/csrf.js';
 import { sendText } from '../server/respond.js';
 import { sites } from '../db/schema.js';
-import { createCleaningRequest } from '../payments/service.js';
+import {
+  createCleaningRequest,
+  DuplicateActiveRequestError,
+  getSitePaymentMethod,
+  saveSitePaymentMethod,
+  SitePaymentMethodAlreadyExistsError,
+} from '../payments/service.js';
 import { MockPaymentGateway, type PaymentGateway } from '../payments/gateway.js';
 
 // Per-IP budget for scan resolution: enough for a genuine scanner retrying,
 // low enough to blunt brute-force token enumeration (SDD §5).
 const SCAN_LIMIT = 30;
 const SCAN_WINDOW_MS = 60_000;
+
+// Step-up re-authentication window for reusing a saved payment method (SDD §6.4, §9.4).
+const RECENT_AUTH_WINDOW_SECONDS = 300;
 
 function sendNeutralPage(res: ServerResponse): void {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -53,9 +68,45 @@ async function siteFixedPriceCents(db: AppDatabase, siteId: string): Promise<num
 }
 
 /**
- * Renders the confirmation page for an already-authorized caller, or null if
- * this caller/token combination does not clear the matrix -- in which case
- * the handler falls back to the unchanged neutral page.
+ * Renders whichever of the three saved-payment-method states applies (SDD §9.4, §11.7) for
+ * a caller who has already cleared the `create_cleaning_request` gate at this site: add a
+ * method, authorize with the saved one, or re-authenticate first. Shared by the `GET`
+ * handler and the successful `POST /s/:token/payment-method` response so "add, then
+ * authorize" needs only two clicks -- without ever skipping the step-up check that follows.
+ */
+async function renderSiteAuthorizedState(
+  db: AppDatabase,
+  session: SessionPayload,
+  siteId: string,
+  siteName: string,
+  amountCents: number,
+  rawToken: string,
+  csrfToken: string,
+): Promise<string> {
+  const savedMethod = await getSitePaymentMethod(db, siteId);
+  if (!savedMethod) {
+    return renderAddPaymentMethodPage({ siteName, amountCents, token: rawToken, csrfToken });
+  }
+  if (!sessionAuthenticatedWithin(session, RECENT_AUTH_WINDOW_SECONDS)) {
+    return renderReauthRequiredPage({
+      siteName,
+      token: rawToken,
+      savedMethodLabel: savedMethod.displayLabel,
+    });
+  }
+  return renderConfirmPage({
+    siteName,
+    amountCents,
+    token: rawToken,
+    csrfToken,
+    savedMethodLabel: savedMethod.displayLabel,
+  });
+}
+
+/**
+ * Renders the appropriate authorized-caller state (see `renderSiteAuthorizedState`), or
+ * null if this caller/token combination does not clear the matrix -- in which case the
+ * handler falls back to the unchanged neutral page.
  */
 async function tryRenderConfirmPage(
   runtime: AuthRuntime,
@@ -91,7 +142,15 @@ async function tryRenderConfirmPage(
   }
   const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
   const csrfToken = csrfTokenForSession(sessionToken, runtime.sessionSecret);
-  return renderConfirmPage({ siteName: site.name, amountCents, token: rawToken, csrfToken });
+  return renderSiteAuthorizedState(
+    db,
+    session,
+    resolved.siteId,
+    site.name,
+    amountCents,
+    rawToken,
+    csrfToken,
+  );
 }
 
 /**
@@ -164,13 +223,98 @@ export function registerPublicRoutes(
       sendText(res, 403, 'Forbidden');
       return;
     }
-    const { request } = await createCleaningRequest(db, gateway, {
-      siteId: resolved.siteId,
-      bathroomId: resolved.bathroomId,
-      requestedByUserId: session.userId,
-      amountCents,
-    });
+    // Placing a hold now requires a saved (mock) payment method (SDD §9.4) -- re-checked
+    // here regardless of what the GET page showed, per "authorization precedes any
+    // business logic" (§7). Reusing it further requires a recent authentication (§6.4);
+    // this is the real enforcement point, not the GET page's re-authenticate prompt.
+    const savedMethod = await getSitePaymentMethod(db, resolved.siteId);
+    if (!savedMethod) {
+      sendText(res, 409, 'Add a payment method before authorizing a hold');
+      return;
+    }
+    if (!sessionAuthenticatedWithin(session, RECENT_AUTH_WINDOW_SECONDS)) {
+      sendText(res, 401, 'Re-authentication required');
+      return;
+    }
+    let request;
+    try {
+      ({ request } = await createCleaningRequest(db, gateway, {
+        siteId: resolved.siteId,
+        bathroomId: resolved.bathroomId,
+        requestedByUserId: session.userId,
+        amountCents,
+      }));
+    } catch (error) {
+      if (error instanceof DuplicateActiveRequestError) {
+        sendText(res, 409, error.message);
+        return;
+      }
+      throw error;
+    }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(renderAuthorizedPage(request.amountCents));
+  });
+
+  router.post('/s/:token/payment-method', async ({ req, res, params }: RouteContext) => {
+    const session = readSession(req, runtime);
+    if (!session) {
+      sendText(res, 401, 'Authentication required');
+      return;
+    }
+    const db = runtime.connection?.db;
+    if (!db || !runtime.sessionSecret) {
+      sendText(res, 503, 'This action is not configured');
+      return;
+    }
+    const rawToken = params.token ?? '';
+    const resolved = await resolveActiveQrToken(db, rawToken);
+    if (!resolved) {
+      sendText(res, 404, 'Unknown or inactive QR code');
+      return;
+    }
+    const amountCents = await siteFixedPriceCents(db, resolved.siteId);
+    if (amountCents === null) {
+      sendText(res, 404, 'Site not found');
+      return;
+    }
+    const decision = await authorizeAction(db, session.userId, {
+      type: 'save_payment_method',
+      siteId: resolved.siteId,
+    });
+    if (!decision.allowed) {
+      sendText(res, 403, 'Forbidden');
+      return;
+    }
+    try {
+      await saveSitePaymentMethod(db, resolved.siteId, session.userId);
+    } catch (error) {
+      if (error instanceof SitePaymentMethodAlreadyExistsError) {
+        sendText(res, 409, error.message);
+        return;
+      }
+      throw error;
+    }
+    const [site] = await db
+      .select({ name: sites.name })
+      .from(sites)
+      .where(eq(sites.id, resolved.siteId))
+      .limit(1);
+    if (!site) {
+      sendText(res, 404, 'Site not found');
+      return;
+    }
+    const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
+    const csrfToken = csrfTokenForSession(sessionToken, runtime.sessionSecret);
+    const html = await renderSiteAuthorizedState(
+      db,
+      session,
+      resolved.siteId,
+      site.name,
+      amountCents,
+      rawToken,
+      csrfToken,
+    );
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
   });
 }

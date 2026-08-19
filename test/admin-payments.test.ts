@@ -63,7 +63,8 @@ async function withRunningServer<T>(
 
 /** Places one hold end-to-end via the real HTTP authorize route, so it shares the
  * same in-process mocked gateway a subsequent capture/cancel call on the same
- * server will observe (SDD §9.3). */
+ * server will observe (SDD §9.3). Saves the site's (mock) payment method first
+ * (SDD §9.4) -- authorizing now requires one to already exist. */
 async function authorizeOneHold(
   baseUrl: string,
   db: TestDatabase['db'],
@@ -81,6 +82,11 @@ async function authorizeOneHold(
     maxAuthorizationCents: fixedPriceCents,
   });
   const { cookie, csrf } = sessionAndCsrf(managerId);
+  const savedMethodRes = await fetch(`${baseUrl}/s/${issued.rawToken}/payment-method`, {
+    method: 'POST',
+    headers: { cookie: `rs_session=${cookie}`, 'x-csrf-token': csrf },
+  });
+  assert.equal(savedMethodRes.status, 200);
   const res = await fetch(`${baseUrl}/s/${issued.rawToken}/authorize`, {
     method: 'POST',
     headers: { cookie: `rs_session=${cookie}`, 'x-csrf-token': csrf },

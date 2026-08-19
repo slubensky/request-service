@@ -23,10 +23,13 @@ import type { PgConnection } from '../src/db/client.js';
 import { csrfTokenForSession } from '../src/auth/csrf.js';
 import { signSession } from '../src/auth/session.js';
 import { createSite, addBathroom, issueQrToken } from '../src/admin/service.js';
+import { saveSitePaymentMethod } from '../src/payments/service.js';
 import { siteRoles, users, cleaningRequests, paymentAuthorizations } from '../src/db/schema.js';
 import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
 
 const SESSION_SECRET = 'test-session-secret-placeholder';
+// Step-up re-authentication window (SDD §6.4, §9.4): must match src/public/routes.ts.
+const RECENT_AUTH_WINDOW_SECONDS = 300;
 
 function runtimeFor(db: TestDatabase['db']): AuthRuntime {
   return {
@@ -45,8 +48,10 @@ async function insertUser(db: TestDatabase['db'], sub: string): Promise<string> 
   return row.id;
 }
 
-function sessionAndCsrf(userId: string): { cookie: string; csrf: string } {
-  const token = signSession({ userId, sub: `sub-${userId}` }, SESSION_SECRET);
+/** `nowSeconds` lets a test mint a session that is already stale for the step-up recency
+ * check (SDD §6.4) while still being a validly-signed, unexpired session. */
+function sessionAndCsrf(userId: string, nowSeconds?: number): { cookie: string; csrf: string } {
+  const token = signSession({ userId, sub: `sub-${userId}` }, SESSION_SECRET, nowSeconds);
   return { cookie: token, csrf: csrfTokenForSession(token, SESSION_SECRET) };
 }
 
@@ -134,7 +139,7 @@ test('GET /s/:token: anonymous, no-role, pending-assistant, and wrong-site-manag
   }
 });
 
-test('GET /s/:token: an authorized manager at the resolved site sees the price-confirmation page', async () => {
+test('GET /s/:token: an authorized manager at a site with no saved payment method sees the add-method page (SDD §9.4)', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
@@ -156,7 +161,70 @@ test('GET /s/:token: an authorized manager at the resolved site sees the price-c
       const body = await res.text();
       assert.match(body, /\$45\.00/);
       assert.match(body, /Central Plaza/);
+      assert.match(body, /Add a payment method \(mock\)/);
+      assert.match(body, new RegExp(`/s/${rawToken}/payment-method`));
+      assert.doesNotMatch(body, new RegExp(`/s/${rawToken}/authorize`));
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test('GET /s/:token: a saved payment method and a recently-authenticated session shows the authorize form', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
+    const managerId = await insertUser(db, 'sub-manager-recent');
+    await db.insert(siteRoles).values({
+      siteId,
+      userId: managerId,
+      role: 'manager',
+      status: 'authorized',
+      maxAuthorizationCents: 10000,
+    });
+    await saveSitePaymentMethod(db, siteId, managerId);
+    const { cookie } = sessionAndCsrf(managerId);
+
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/s/${rawToken}`, {
+        headers: { cookie: `rs_session=${cookie}` },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.text();
+      assert.match(body, /\$45\.00/);
+      assert.match(body, /Mock Visa/);
       assert.match(body, new RegExp(`/s/${rawToken}/authorize`));
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test('GET /s/:token: a saved payment method and a stale session shows a re-authenticate prompt, not an authorize form', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
+    const managerId = await insertUser(db, 'sub-manager-stale');
+    await db.insert(siteRoles).values({
+      siteId,
+      userId: managerId,
+      role: 'manager',
+      status: 'authorized',
+      maxAuthorizationCents: 10000,
+    });
+    await saveSitePaymentMethod(db, siteId, managerId);
+    const staleIat = Math.floor(Date.now() / 1000) - RECENT_AUTH_WINDOW_SECONDS - 30;
+    const { cookie } = sessionAndCsrf(managerId, staleIat);
+
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/s/${rawToken}`, {
+        headers: { cookie: `rs_session=${cookie}` },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.text();
+      assert.match(body, /re-verify your identity/i);
+      assert.match(body, new RegExp(`/auth/login\\?next=%2Fs%2F${rawToken}`));
+      assert.doesNotMatch(body, new RegExp(`/s/${rawToken}/authorize`));
     });
   } finally {
     await client.close();
@@ -255,6 +323,7 @@ test('POST /s/:token/authorize for an authorized manager places a hold end-to-en
       status: 'authorized',
       maxAuthorizationCents: 10000,
     });
+    await saveSitePaymentMethod(db, siteId, managerId);
     const { cookie, csrf } = sessionAndCsrf(managerId);
 
     await withRunningServer(runtimeFor(db), async (baseUrl) => {
@@ -279,6 +348,140 @@ test('POST /s/:token/authorize for an authorized manager places a hold end-to-en
     assert.equal(auths.length, 1);
     assert.equal(auths[0]?.status, 'requires_capture');
     assert.match(auths[0]?.stripePaymentIntentId ?? '', /^mock_pi_/);
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST /s/:token/authorize is rejected 409 when the site has no saved payment method yet (SDD §9.4)', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
+    const managerId = await insertUser(db, 'sub-manager-no-method');
+    await db.insert(siteRoles).values({
+      siteId,
+      userId: managerId,
+      role: 'manager',
+      status: 'authorized',
+      maxAuthorizationCents: 10000,
+    });
+    const { cookie, csrf } = sessionAndCsrf(managerId);
+
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/s/${rawToken}/authorize`, {
+        method: 'POST',
+        headers: { cookie: `rs_session=${cookie}`, 'x-csrf-token': csrf },
+      });
+      assert.equal(res.status, 409);
+    });
+
+    assert.equal((await db.select().from(cleaningRequests)).length, 0);
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST /s/:token/authorize is rejected 401 (step-up required) when the session predates the recency window (SDD §6.4)', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
+    const managerId = await insertUser(db, 'sub-manager-stale-authorize');
+    await db.insert(siteRoles).values({
+      siteId,
+      userId: managerId,
+      role: 'manager',
+      status: 'authorized',
+      maxAuthorizationCents: 10000,
+    });
+    await saveSitePaymentMethod(db, siteId, managerId);
+    const staleIat = Math.floor(Date.now() / 1000) - RECENT_AUTH_WINDOW_SECONDS - 30;
+    const { cookie, csrf } = sessionAndCsrf(managerId, staleIat);
+
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/s/${rawToken}/authorize`, {
+        method: 'POST',
+        headers: { cookie: `rs_session=${cookie}`, 'x-csrf-token': csrf },
+      });
+      assert.equal(res.status, 401);
+    });
+
+    assert.equal((await db.select().from(cleaningRequests)).length, 0);
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST /s/:token/authorize rejects a double-tap: the second concurrent attempt is a clean 409, not a 500 (SDD §9.4)', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
+    const managerId = await insertUser(db, 'sub-manager-double-tap');
+    await db.insert(siteRoles).values({
+      siteId,
+      userId: managerId,
+      role: 'manager',
+      status: 'authorized',
+      maxAuthorizationCents: 10000,
+    });
+    await saveSitePaymentMethod(db, siteId, managerId);
+    const { cookie, csrf } = sessionAndCsrf(managerId);
+
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const authorize = () =>
+        fetch(`${baseUrl}/s/${rawToken}/authorize`, {
+          method: 'POST',
+          headers: { cookie: `rs_session=${cookie}`, 'x-csrf-token': csrf },
+        });
+      const [first, second] = await Promise.all([authorize(), authorize()]);
+      const statuses = [first.status, second.status].sort();
+      assert.deepEqual(statuses, [200, 409]);
+    });
+
+    assert.equal((await db.select().from(cleaningRequests)).length, 1);
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST /s/:token/payment-method: denied for an authenticated customer, allowed for an authorized manager, then rejected 409 on repeat', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
+    const customerId = await insertUser(db, 'sub-customer-payment-method');
+    const { cookie: customerCookie, csrf: customerCsrf } = sessionAndCsrf(customerId);
+    const managerId = await insertUser(db, 'sub-manager-payment-method');
+    await db.insert(siteRoles).values({
+      siteId,
+      userId: managerId,
+      role: 'manager',
+      status: 'authorized',
+      maxAuthorizationCents: 10000,
+    });
+    const { cookie: managerCookie, csrf: managerCsrf } = sessionAndCsrf(managerId);
+
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const denied = await fetch(`${baseUrl}/s/${rawToken}/payment-method`, {
+        method: 'POST',
+        headers: { cookie: `rs_session=${customerCookie}`, 'x-csrf-token': customerCsrf },
+      });
+      assert.equal(denied.status, 403);
+
+      const allowed = await fetch(`${baseUrl}/s/${rawToken}/payment-method`, {
+        method: 'POST',
+        headers: { cookie: `rs_session=${managerCookie}`, 'x-csrf-token': managerCsrf },
+      });
+      assert.equal(allowed.status, 200);
+      const body = await allowed.text();
+      assert.match(body, /Mock Visa/);
+      // Adding it also transitions straight into the authorize state, in the same response.
+      assert.match(body, new RegExp(`/s/${rawToken}/authorize`));
+
+      const repeat = await fetch(`${baseUrl}/s/${rawToken}/payment-method`, {
+        method: 'POST',
+        headers: { cookie: `rs_session=${managerCookie}`, 'x-csrf-token': managerCsrf },
+      });
+      assert.equal(repeat.status, 409);
+    });
   } finally {
     await client.close();
   }
