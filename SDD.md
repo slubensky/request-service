@@ -187,6 +187,7 @@ All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Pa
 - QR resolution is **rate-limited** at the endpoint level to blunt brute-force enumeration (see AGENTS.md security rules on complete mediation and fail-safe defaults; hardened rate limiting is out of scope for MVP per §1.5).
 - A **Company Admin** issues the initial QRToken for a Bathroom as part of onboarding (alongside creating the Site, Bathroom, and price). Tags are **revocable and replaceable**: a Company Admin can invalidate and reissue a QRToken for any Site, and a **Site Manager** may likewise replace the QRToken at their own site (e.g., a printed tag is lost or compromised), without any change to the Bathroom's identity or history.
 - A resolved QRToken identifies a Bathroom **only**. It never authenticates a person and never itself authorizes any action — see §3 for why authority requires a separate SiteRole lookup.
+- **NFC tags reuse the same token and URL** — there is no separate `NfcTag` entity or issuance path. The `GET /s/:token` URL rendered alongside every issued QR (§11.3) is the complete scan target for either medium: writing that same URL to an NFC tag (any standard NFC-writing phone app) is deliberately equivalent to printing the QR — same opaque token, same one-way hash lookup, same revoke/replace semantics, same rate limiting. A site with both a printed QR and a written NFC tag for one Bathroom is just two physical copies of one token until either is replaced.
 
 ## 6. Authentication (Amazon Cognito)
 
@@ -499,6 +500,15 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #006 — 2026-08-19T15:00:00-04:00
+
+Amends §5 to state explicitly that NFC tags reuse the exact QR token/URL — no
+new `NfcTag` entity, issuance path, or capability. The Company Admin console
+already rendered the raw scan URL next to every issued QR (`renderQrIssued`,
+`src/render/templates/admin.ts`); this change adds one line there pointing
+out it's also the NFC write target, and records the decision in the spec.
+No schema, route, or authorization change.
 
 ### #005 — 2026-08-17T14:00:00-04:00
 
