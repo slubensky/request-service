@@ -122,5 +122,22 @@ When completing a coding task, respond with:
 | HTTPS | Required in production (terminate at reverse proxy or platform) |
 
 ## Branch
+
+> **Last edited:** 2026-08-19 — changed merge authority: an agent (Claude) may
+> now merge its own pull request once CI is green, without waiting for a
+> human to click merge. Everything else about the branch/PR workflow is
+> unchanged — a PR is still required, direct commits to `main` are still
+> disallowed, and CI must still be green. See "Merge authority" below.
+
 `main` is the canonical source of truth. Develop on a short-lived feature branch and open a pull request into `main` — do not commit directly to `main`. CI (tests + `terraform validate`) must pass before merge.
+
+### Merge authority
+
+CI green is sufficient authorization to merge — a human does not need to click merge for every PR. An agent that opened a PR may merge it itself once CI passes and the Merge gate criteria below are met, without waiting for further sign-off, *unless*:
+
+- CI is failing (see Failure handling — do not merge),
+- a human has left unresolved review comments or an unaddressed change request on that PR, or
+- the human explicitly asked to review this specific change before it merges.
+
+A human can still review, comment, or block any PR at any time — this changes the *default* (no blocking wait for a merge click), not the ability to intervene. This applies to PRs opened by an agent; it does not change how humans merge their own PRs.
 
