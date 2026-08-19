@@ -154,6 +154,7 @@ export function renderQrIssued(scanUrl: string, qrSvg: string): string {
         <div class="qr-image">${qrSvg}</div>
         <p class="muted-note">Scan target:</p>
         <p><a href="${safeUrl}">${safeUrl}</a></p>
+        <p class="muted-note">Works for NFC too: write this same URL to an NFC tag with any NFC-writing app (e.g. NFC Tools). No separate provisioning -- it's the identical opaque, revocable token either way (SDD §5).</p>
       </section>
       <p><a href="/admin">Back to console</a></p>
   `;
