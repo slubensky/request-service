@@ -137,12 +137,13 @@ export async function findOrCreateUserByCognitoSub(
  * Only not-yet-linked pending invites for `verifiedPhone` are touched
  * (`invited_phone` equal, `user_id IS NULL`, `status=pending`) -- so the write
  * is idempotent: a repeat authentication re-matches nothing already linked.
- * Outcome is role-specific, mirroring the resolution table (§3.2):
- *   - `manager` is activated (`status → authorized`) so the Site becomes
- *     operable per §11.1 -- the invitee is now an active Manager.
- *   - `assistant` is only linked (`status` stays `pending`); it confers no
- *     authority until a manager promotes it (§9/§10). Auto-authorizing here
- *     would be self-elevation.
+ * One-step activation (SDD §3.3, Phase 6): **both** roles are activated
+ * (`status → authorized`) when the invitee accepts -- a `manager` makes the Site
+ * operable per §11.1; an `authorized_user` can then request service (self-
+ * authorizing up to their manager-set limit, over-limit routed to a manager's
+ * approval, §10). This is not self-elevation: the authority-granting act is the
+ * manager's explicit invite; accepting only binds the verified identity to the
+ * SiteRole the manager already created.
  *
  * Grants no authority itself: every request still re-derives authority from the
  * SiteRole matrix (authorize.ts), which denies any non-`authorized` role. A
@@ -189,7 +190,7 @@ export async function bridgePendingSiteRoles(
 
   // The unique (site_id, user_id) index allows at most one role per user per
   // site, so every matching invite must collapse to a single winner per site --
-  // grouping by role alone would miss a manager+assistant duplicate pair at the
+  // grouping by role alone would miss a manager+authorized_user duplicate pair at the
   // same site (SDD §3.3, "Resilient bridge contract").
   const bySite = new Map<string, SiteRoleRow[]>();
   for (const row of pending) {
@@ -262,22 +263,22 @@ async function bridgeSiteGroup(
 }
 
 /**
- * Activates (`manager`) or links (`assistant`) the single winning pending
- * invite for `userId`, mirroring the role-specific outcome in SDD §3.3. The
- * conditional `WHERE` makes the write a no-op -- not a conflict -- if another
- * call already claimed this exact row; a unique-violation from any residual
- * race is caught defensively rather than left to surface as a 500.
+ * Activates the single winning pending invite for `userId` (SDD §3.3, Phase 6:
+ * both `manager` and `authorized_user` invites activate to `authorized` on
+ * accept -- no separate promotion step). The conditional `WHERE` makes the write
+ * a no-op -- not a conflict -- if another call already claimed this exact row; a
+ * unique-violation from any residual race is caught defensively rather than left
+ * to surface as a 500.
  */
 async function activateWinner(
   tx: SiteRoleTx,
   userId: string,
   winner: SiteRoleRow,
 ): Promise<SiteRoleRow | null> {
-  const nextStatus = winner.role === 'manager' ? ('authorized' as const) : ('pending' as const);
   try {
     const [row] = await tx
       .update(siteRoles)
-      .set({ userId, status: nextStatus })
+      .set({ userId, status: 'authorized' })
       .where(
         and(eq(siteRoles.id, winner.id), isNull(siteRoles.userId), eq(siteRoles.status, 'pending')),
       )

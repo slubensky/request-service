@@ -30,7 +30,9 @@ import {
   inviteInitialManager,
   issueQrToken,
   listSitesWithBathrooms,
+  revokeSiteRole,
   SiteNotFoundError,
+  SiteRoleNotFoundError,
   BathroomNotFoundError,
   type CreateSiteInput,
   type IssuedQrToken,
@@ -116,13 +118,11 @@ async function handleConsole(runtime: AuthRuntime, ctx: RouteContext): Promise<v
   const csrfToken = csrfTokenForSession(sessionToken, secret);
   const siteList = await listSitesWithBathrooms(db);
   // Demo-only (SDD §6.3): surface the single-use accept code for each pending
-  // invite. `demoCodesForConsole` returns an empty map off DEMO_MODE, and
-  // `demoMode` itself gates whether the pending-invites section renders at all
-  // -- the console is byte-for-byte unchanged in production.
-  const demoMode = isDemoMode();
+  // manager invite. `demoCodesForConsole` returns an empty map off DEMO_MODE, so
+  // no codes render in production; the managers list itself renders everywhere.
   const demoCodes = await demoCodesForConsole(db, siteList);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(renderAdminConsole(siteList, csrfToken, demoMode, demoCodes));
+  res.end(renderAdminConsole(siteList, csrfToken, demoCodes));
 }
 
 /**
@@ -137,7 +137,9 @@ async function demoCodesForConsole(
   if (!isDemoMode()) {
     return new Map();
   }
-  const pendingIds = siteList.flatMap((entry) => entry.pendingInvites.map((invite) => invite.id));
+  const pendingIds = siteList.flatMap((entry) =>
+    entry.managers.filter((manager) => manager.status === 'pending').map((manager) => manager.id),
+  );
   return unusedCodesForSiteRoles(db, pendingIds);
 }
 
@@ -214,9 +216,9 @@ async function handleInviteManager(runtime: AuthRuntime, ctx: RouteContext): Pro
     sendText(ctx.res, 400, phone.error);
     return;
   }
-  let invited;
+  let outcome;
   try {
-    invited = await inviteInitialManager(gate.db, siteId, phone.value);
+    outcome = await inviteInitialManager(gate.db, siteId, phone.value);
   } catch (error) {
     if (error instanceof SiteNotFoundError) {
       sendText(ctx.res, 404, 'Site not found');
@@ -224,11 +226,34 @@ async function handleInviteManager(runtime: AuthRuntime, ctx: RouteContext): Pro
     }
     throw error;
   }
+  if (!outcome.created) {
+    // Idempotent no-op (SDD §11.1): the phone already holds a non-revoked role here.
+    sendText(ctx.res, 200, 'That phone is already a member of this site — no new invite created.');
+    return;
+  }
   // Demo-only (SDD §6.3): mint the single-use accept code so the console can
   // display it, via the same service the manager console uses; a no-op in
   // production where DEMO_MODE is off.
   if (isDemoMode()) {
-    await issueDemoInviteCode(gate.db, invited.id);
+    await issueDemoInviteCode(gate.db, outcome.role.id);
+  }
+  sendText(ctx.res, 200, 'Invitation sent.');
+}
+
+/** Company Admin revoke of a SiteRole (a Manager) at a site (SDD §11.1, §7). */
+async function handleRevokeRole(runtime: AuthRuntime, ctx: RouteContext): Promise<void> {
+  const siteId = ctx.params.siteId ?? '';
+  const roleId = ctx.params.roleId ?? '';
+  const gate = await authorizeOrReject(runtime, ctx, { type: 'revoke_site_role', siteId });
+  if (!gate) return;
+  try {
+    await revokeSiteRole(gate.db, siteId, roleId);
+  } catch (error) {
+    if (error instanceof SiteRoleNotFoundError) {
+      sendText(ctx.res, 404, 'Site role not found');
+      return;
+    }
+    throw error;
   }
   ctx.res.writeHead(204).end();
 }
@@ -348,6 +373,9 @@ export function registerAdminRoutes(
   );
   router.post('/admin/sites/:siteId/managers', (ctx) =>
     withBodyLimit(handleInviteManager)(runtime, ctx),
+  );
+  router.post('/admin/sites/:siteId/roles/:roleId/revoke', (ctx) =>
+    withBodyLimit(handleRevokeRole)(runtime, ctx),
   );
   router.get('/admin/payments', (ctx) => handleListPayments(runtime, ctx));
   registerCaptureOrCancel(

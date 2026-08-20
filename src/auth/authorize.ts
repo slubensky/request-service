@@ -13,8 +13,9 @@
  *      independent of any SiteRole: site/bathroom/QR/price onboarding, invite of
  *      the initial site manager, payment capture/cancel, and internal ops.
  *   2. SiteRole (role + status), scoped to the action's target site -- manager
- *      and assistant authority: requesting cleanings, approving assistant
- *      requests, managing assistants, viewing payments, replacing QR at-site.
+ *      and authorized_user authority: requesting cleanings, approving an
+ *      authorized user's over-limit request, managing authorized users (invite /
+ *      set-limit / delete), viewing payments, replacing QR at-site.
  *
  * Each action maps to exactly one capability; a principal is granted it only if
  * the platform matrix (for their platform_role) OR the site matrix (for their
@@ -27,8 +28,9 @@
  * - Otherwise the principal needs a SiteRole for the action's site: no role ->
  *   deny (customer); different site -> deny; revoked or not-yet-authorized ->
  *   deny; capability not granted to the role -> deny.
- * - Starting a paid request is additionally bounded by bathroom scope and
- *   max_authorization_cents; a pending assistant can never self-authorize.
+ * - Starting a paid request is additionally bounded by bathroom scope; a manager
+ *   has no amount limit, while an authorized_user is bounded by
+ *   max_authorization_cents (over-limit routes to a manager's approval, §10).
  */
 
 /**
@@ -40,8 +42,11 @@ export type PlatformRole = 'member' | 'company_admin';
 /**
  * Site-scoped roles stored in SiteRole. Intentionally open for extension: a new
  * role is a new key in SITE_ROLE_CAPABILITIES, not a new branch here.
+ * A `manager` has no authorization limit; an `authorized_user` self-authorizes
+ * only up to their `maxAuthorizationCents`, over-limit requests routed to a
+ * manager's approval (SDD §7, §10).
  */
-export type Role = 'manager' | 'assistant';
+export type Role = 'manager' | 'authorized_user';
 export type RoleStatus = 'pending' | 'authorized' | 'revoked';
 
 /**
@@ -56,16 +61,17 @@ export type Capability =
   | 'qr_token:issue'
   | 'price:manage'
   | 'site_role:invite_initial_manager'
+  | 'site_role:revoke'
   | 'payment:capture'
   | 'payment:cancel'
   | 'ops:mark_completed'
-  // Site-scoped (manager / assistant) capabilities.
+  // Site-scoped (manager / authorized_user) capabilities.
   | 'cleaning_request:create'
   | 'payment_method:save'
-  | 'assistant_request:approve'
+  | 'request:approve'
   | 'site_role:invite'
-  | 'site_role:promote'
-  | 'site_role:revoke'
+  | 'site_role:set_limit'
+  | 'site_role:delete'
   | 'payment:view'
   | 'qr_token:replace';
 
@@ -102,16 +108,17 @@ export type Action =
   | { type: 'issue_qr_token'; siteId: string; bathroomId: string }
   | { type: 'manage_price'; siteId: string }
   | { type: 'invite_initial_manager'; siteId: string }
+  | { type: 'revoke_site_role'; siteId: string }
   | { type: 'capture_payment'; siteId: string }
   | { type: 'cancel_payment'; siteId: string }
   | { type: 'mark_completed'; siteId: string }
-  // Site-scoped (manager / assistant) actions.
+  // Site-scoped (manager / authorized_user) actions.
   | { type: 'create_cleaning_request'; siteId: string; bathroomId: string; amountCents: number }
   | { type: 'save_payment_method'; siteId: string }
-  | { type: 'approve_assistant_request'; siteId: string }
+  | { type: 'approve_request'; siteId: string }
   | { type: 'invite_site_role'; siteId: string }
-  | { type: 'promote_site_role'; siteId: string }
-  | { type: 'revoke_site_role'; siteId: string }
+  | { type: 'set_site_role_limit'; siteId: string }
+  | { type: 'delete_site_role'; siteId: string }
   | { type: 'view_payment'; siteId: string }
   | { type: 'replace_qr_token'; siteId: string; bathroomId: string };
 
@@ -135,15 +142,16 @@ const ACTION_CAPABILITY: Record<Action['type'], Capability> = {
   issue_qr_token: 'qr_token:issue',
   manage_price: 'price:manage',
   invite_initial_manager: 'site_role:invite_initial_manager',
+  revoke_site_role: 'site_role:revoke',
   capture_payment: 'payment:capture',
   cancel_payment: 'payment:cancel',
   mark_completed: 'ops:mark_completed',
   create_cleaning_request: 'cleaning_request:create',
   save_payment_method: 'payment_method:save',
-  approve_assistant_request: 'assistant_request:approve',
+  approve_request: 'request:approve',
   invite_site_role: 'site_role:invite',
-  promote_site_role: 'site_role:promote',
-  revoke_site_role: 'site_role:revoke',
+  set_site_role_limit: 'site_role:set_limit',
+  delete_site_role: 'site_role:delete',
   view_payment: 'payment:view',
   replace_qr_token: 'qr_token:replace',
 };
@@ -165,6 +173,9 @@ const PLATFORM_CAPABILITIES: Record<PlatformRole, ReadonlySet<Capability>> = {
     'qr_token:replace',
     'price:manage',
     'site_role:invite_initial_manager',
+    // Revoke a Manager (SDD §7, §11.1). Held on the platform axis so it applies
+    // cross-site, the same way qr_token:replace sits on both axes.
+    'site_role:revoke',
     'payment:capture',
     'payment:cancel',
     'ops:mark_completed',
@@ -181,17 +192,18 @@ const SITE_ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
   manager: new Set<Capability>([
     'cleaning_request:create',
     'payment_method:save',
-    'assistant_request:approve',
+    'request:approve',
     'site_role:invite',
-    'site_role:promote',
-    'site_role:revoke',
+    'site_role:set_limit',
+    'site_role:delete',
     'payment:view',
     'qr_token:replace',
   ]),
-  // Same role set as cleaning_request:create (SDD §9.4) -- saving the site's mock payment
-  // method is tightly coupled to placing a hold, and an authorized assistant may already
-  // place holds, not just a manager.
-  assistant: new Set<Capability>(['cleaning_request:create', 'payment_method:save']),
+  // Same site capabilities as the old assistant role: an authorized user may request a
+  // cleaning and save the site's mock payment method (SDD §9.4). Whether a given request
+  // self-authorizes or is routed to a manager's approval is decided by amount-vs-limit in
+  // authorizePaidRequest below and by the route, not by the capability set.
+  authorized_user: new Set<Capability>(['cleaning_request:create', 'payment_method:save']),
 };
 
 function deny(reason: DenyReason): AuthorizationDecision {
@@ -214,8 +226,12 @@ function withinLimit(role: ResolvedSiteRole, amountCents: number): boolean {
 }
 
 /**
- * Extra constraints for a paid request beyond holding the capability: the
- * bathroom must be in scope and the amount within the role's ceiling.
+ * Extra constraints for a paid request beyond holding the capability (SDD §7):
+ * the bathroom must be in scope, and — for an `authorized_user` — the amount must
+ * be within their limit. A `manager` has no limit (`maxAuthorizationCents = null`
+ * = unlimited) and self-authorizes any amount. For an `authorized_user`, an amount
+ * over the limit is denied with `exceeds_max_authorization`; the route treats that
+ * specific denial as "route to a manager's approval" (SDD §10), not a hard refusal.
  */
 function authorizePaidRequest(
   role: ResolvedSiteRole,
@@ -223,6 +239,9 @@ function authorizePaidRequest(
 ): AuthorizationDecision {
   if (!bathroomInScope(role, action.bathroomId)) {
     return deny('bathroom_out_of_scope');
+  }
+  if (role.role === 'manager') {
+    return ALLOW; // unlimited authorization
   }
   if (role.maxAuthorizationCents === null) {
     return deny('no_authorization_limit');

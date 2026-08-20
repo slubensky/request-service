@@ -31,7 +31,7 @@ export const userStatus = pgEnum('user_status', ['active', 'disabled']);
 // internally and NEVER acquired via self-service, QR scan, or Cognito login.
 // Extensible: a new platform role is a new enum value + matrix entry.
 export const platformRoleName = pgEnum('platform_role', ['member', 'company_admin']);
-export const siteRoleName = pgEnum('site_role_name', ['manager', 'assistant']);
+export const siteRoleName = pgEnum('site_role_name', ['manager', 'authorized_user']);
 export const siteRoleStatus = pgEnum('site_role_status', ['pending', 'authorized', 'revoked']);
 export const cleaningRequestStatus = pgEnum('cleaning_request_status', [
   'authorizing',
@@ -46,7 +46,7 @@ export const paymentAuthorizationStatus = pgEnum('payment_authorization_status',
   'canceled',
   'expired',
 ]);
-export const approvalStatus = pgEnum('assistant_approval_status', [
+export const approvalStatus = pgEnum('request_approval_status', [
   'pending',
   'granted',
   'used',
@@ -199,7 +199,9 @@ export const sitePaymentMethods = pgTable(
   (table) => [uniqueIndex('site_payment_methods_site_key').on(table.siteId)],
 );
 
-export const assistantApprovalRequests = pgTable('assistant_approval_requests', {
+// An authorized user's over-limit request awaiting a manager's approval (SDD §10).
+// Renamed from assistant_approval_requests in Phase 6 (assistant -> authorized_user).
+export const requestApprovals = pgTable('request_approvals', {
   id: id(),
   siteId: uuid('site_id')
     .notNull()
@@ -207,7 +209,7 @@ export const assistantApprovalRequests = pgTable('assistant_approval_requests', 
   bathroomId: uuid('bathroom_id')
     .notNull()
     .references(() => bathrooms.id, { onDelete: 'cascade' }),
-  assistantId: uuid('assistant_id')
+  requesterUserId: uuid('requester_user_id')
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
   // Bound values: changing any of these invalidates a prior approval (SDD §10).
@@ -274,6 +276,6 @@ export type SiteRoleRow = typeof siteRoles.$inferSelect;
 export type CleaningRequestRow = typeof cleaningRequests.$inferSelect;
 export type PaymentAuthorizationRow = typeof paymentAuthorizations.$inferSelect;
 export type SitePaymentMethodRow = typeof sitePaymentMethods.$inferSelect;
-export type AssistantApprovalRequestRow = typeof assistantApprovalRequests.$inferSelect;
+export type RequestApprovalRow = typeof requestApprovals.$inferSelect;
 export type PublicAlertRow = typeof publicAlerts.$inferSelect;
 export type DemoInviteCodeRow = typeof demoInviteCodes.$inferSelect;

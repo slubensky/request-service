@@ -154,8 +154,8 @@ export async function acceptDemoInviteCode(
   const sub = `demo:${invitedPhone}`;
   const user = await findOrCreateUserByCognitoSub(db, sub, invitedPhone);
 
-  // Reuse the real activation bridge UNCHANGED: manager -> authorized, assistant
-  // -> linked but still pending (no self-elevation).
+  // Reuse the real activation bridge UNCHANGED: both manager and authorized_user
+  // invites activate to `authorized` on accept (SDD §3.3, Phase 6).
   await bridgePendingSiteRoles(db, user.id, invitedPhone);
 
   // Reflect the actual post-bridge state rather than assuming it.

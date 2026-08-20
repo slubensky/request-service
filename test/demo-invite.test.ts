@@ -6,7 +6,7 @@
  * Coverage:
  *  - happy path: a manager code activates the invite (status authorized) and
  *    mints a working signed session, end-to-end through GET+POST /invite/accept;
- *  - an assistant code links the identity but stays pending (no self-elevation);
+ *  - an authorized_user code links the identity and activates it in one step;
  *  - an unknown/empty code is rejected;
  *  - an already-used code is rejected (single-use), with the §3.3 bridge run once;
  *  - the pre-session POST is protected by a double-submit token (CSRF mismatch
@@ -234,30 +234,31 @@ test('happy path: a manager code activates the invite and mints a working sessio
   });
 });
 
-test('an assistant code links the identity but stays pending -- no self-elevation', async () => {
+test('an authorized_user code links the identity and activates it in one step', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const siteId = await seedSite(db);
-    await inviteSiteMember(db, siteId, 'assistant', PHONE);
+    await inviteSiteMember(db, siteId, 'authorized_user', PHONE, 5000);
     const inviteId = await soleInviteId(db, siteId);
     const { code } = await issueDemoInviteCode(db, inviteId);
 
     const outcome = await acceptDemoInviteCode(db, code);
     assert.ok(outcome, 'a valid code is accepted');
-    assert.equal(outcome.role, 'assistant');
-    assert.equal(outcome.activated, false);
+    assert.equal(outcome.role, 'authorized_user');
+    assert.equal(outcome.activated, true);
 
     const [role] = await db.select().from(siteRoles).where(eq(siteRoles.id, inviteId)).limit(1);
-    assert.equal(role?.status, 'pending');
+    assert.equal(role?.status, 'authorized');
     assert.equal(role?.userId, outcome.userId);
 
+    // The authorized user can now request service within their limit (4500 <= 5000).
     const decision = await authorizeAction(db, outcome.userId, {
       type: 'create_cleaning_request',
       siteId,
       bathroomId: DUMMY_BATHROOM,
       amountCents: 4500,
     });
-    assert.equal(decision.allowed, false);
+    assert.equal(decision.allowed, true);
   } finally {
     await client.close();
   }
@@ -352,15 +353,15 @@ test('DEMO_MODE off: accept routes are not registered and no code is exposed', a
           terms: null,
           createdAt: new Date(),
         },
-        pendingInvites: [
+        members: [
           {
             id: 'r1',
             siteId: 's1',
             userId: null,
             invitedPhone: PHONE,
-            role: 'assistant',
+            role: 'authorized_user',
             status: 'pending',
-            maxAuthorizationCents: null,
+            maxAuthorizationCents: 3000,
             bathroomScope: null,
             createdAt: new Date(),
           },
@@ -380,7 +381,7 @@ test('the console exposes a usable code in demo mode and drops it once spent', a
     const { db, client } = await createTestDatabase();
     try {
       const siteId = await seedSite(db);
-      await inviteSiteMember(db, siteId, 'assistant', PHONE);
+      await inviteSiteMember(db, siteId, 'authorized_user', PHONE, 3000);
       const inviteId = await soleInviteId(db, siteId);
       const { code } = await issueDemoInviteCode(db, inviteId);
 

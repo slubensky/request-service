@@ -4,15 +4,18 @@
  *
  * `GET /s/:token` performs a rate-limited, hash-based token lookup. For any
  * caller WITHOUT authorized site authority at the resolved site -- anonymous,
- * no SiteRole, a pending assistant, a manager authorized elsewhere -- the
- * response is the neutral "see staff" page, byte-for-byte identical whether
- * the token is active, revoked, or unknown, and whether or not the site has
- * an activated manager: there is deliberately no oracle for that population.
- * An authorized Manager/Assistant at the resolved site is the sole, deliberate
- * exception (§11.2): they see a price-confirmation page instead, gated by the
- * same deny-by-default matrix (§7) as every other authorized action.
+ * no SiteRole, an invited-but-not-accepted member, a manager authorized
+ * elsewhere -- the response is the neutral "see staff" page, byte-for-byte
+ * identical whether the token is active, revoked, or unknown, and whether or not
+ * the site has an activated manager: there is deliberately no oracle for that
+ * population. An authorized Manager or authorized user at the resolved site is
+ * the sole, deliberate exception (§11.2): they see a price-confirmation page
+ * instead, gated by the same deny-by-default matrix (§7) as every other action.
  *
- * `POST /s/:token/authorize` places the hold (§9.3) for an authorized caller.
+ * `POST /s/:token/authorize` places the hold (§9.3) for a caller who clears the
+ * matrix directly (a manager at any amount, or an authorized user within their
+ * limit). An authorized user's over-limit request instead records a pending
+ * approval a manager must grant (§10) -- no hold is placed here.
  */
 import type { ServerResponse } from 'node:http';
 import { eq } from 'drizzle-orm';
@@ -24,9 +27,11 @@ import { resolveActiveQrToken, type ResolvedQrTarget } from '../qr/tokens.js';
 import { renderPublicScanPage } from '../render/templates/public-scan.js';
 import {
   renderAddPaymentMethodPage,
+  renderApprovalPendingPage,
   renderAuthorizedPage,
   renderConfirmPage,
   renderReauthRequiredPage,
+  renderRequestApprovalPage,
 } from '../render/templates/confirm.js';
 import { readSession, sessionAuthenticatedWithin } from '../auth/guard.js';
 import type { SessionPayload } from '../auth/session.js';
@@ -43,6 +48,7 @@ import {
   saveSitePaymentMethod,
   SitePaymentMethodAlreadyExistsError,
 } from '../payments/service.js';
+import { createRequestApproval, findPendingApproval } from '../payments/approvals.js';
 import { MockPaymentGateway, type PaymentGateway } from '../payments/gateway.js';
 
 // Per-IP budget for scan resolution: enough for a genuine scanner retrying,
@@ -129,7 +135,11 @@ async function tryRenderConfirmPage(
     bathroomId: resolved.bathroomId,
     amountCents,
   });
-  if (!decision.allowed || !runtime.sessionSecret) {
+  // Not authorized to place a hold and not an over-limit authorized user -> neutral page.
+  if (!runtime.sessionSecret) {
+    return null;
+  }
+  if (!decision.allowed && decision.reason !== 'exceeds_max_authorization') {
     return null;
   }
   const [site] = await db
@@ -142,15 +152,29 @@ async function tryRenderConfirmPage(
   }
   const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
   const csrfToken = csrfTokenForSession(sessionToken, runtime.sessionSecret);
-  return renderSiteAuthorizedState(
-    db,
-    session,
-    resolved.siteId,
-    site.name,
+  if (decision.allowed) {
+    return renderSiteAuthorizedState(
+      db,
+      session,
+      resolved.siteId,
+      site.name,
+      amountCents,
+      rawToken,
+      csrfToken,
+    );
+  }
+  // Over-limit authorized user (SDD §10): show "awaiting approval" if one is already pending
+  // for this bathroom, otherwise the "request manager approval" affordance.
+  const pending = await findPendingApproval(db, resolved.bathroomId, session.userId);
+  if (pending) {
+    return renderApprovalPendingPage(site.name, amountCents);
+  }
+  return renderRequestApprovalPage({
+    siteName: site.name,
     amountCents,
-    rawToken,
+    token: rawToken,
     csrfToken,
-  );
+  });
 }
 
 /**
@@ -220,6 +244,26 @@ export function registerPublicRoutes(
       amountCents,
     });
     if (!decision.allowed) {
+      // Over-limit authorized user (SDD §10): record a pending approval instead of a hold.
+      // No saved-method / step-up gate here -- recording an approval moves no money; the
+      // manager's grant is what places the hold.
+      if (decision.reason === 'exceeds_max_authorization') {
+        await createRequestApproval(db, {
+          siteId: resolved.siteId,
+          bathroomId: resolved.bathroomId,
+          requesterUserId: session.userId,
+          priceVersion: 1,
+          amountCents,
+        });
+        const [site] = await db
+          .select({ name: sites.name })
+          .from(sites)
+          .where(eq(sites.id, resolved.siteId))
+          .limit(1);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(renderApprovalPendingPage(site?.name ?? 'this site', amountCents));
+        return;
+      }
       sendText(res, 403, 'Forbidden');
       return;
     }

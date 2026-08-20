@@ -25,7 +25,12 @@ async function submitForm(form) {
     return;
   }
 
-  // A no-content mutation; reload to reflect the new pending invite.
+  // A text/plain outcome message (e.g. "Invitation sent." vs "already a member");
+  // surface it, then reload to reflect the new state. A 204 mutation has an empty body.
+  const message = (await response.text()).trim();
+  if (message) {
+    window.alert(message);
+  }
   window.location.reload();
 }
 

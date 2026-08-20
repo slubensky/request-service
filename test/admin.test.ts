@@ -167,10 +167,12 @@ test('inviteInitialManager creates a pending manager role bound to a phone, no u
   try {
     const siteId = await seedSite(db);
     const invite = await inviteInitialManager(db, siteId, '+15555550100');
-    assert.equal(invite.role, 'manager');
-    assert.equal(invite.status, 'pending');
-    assert.equal(invite.invitedPhone, '+15555550100');
-    assert.equal(invite.userId, null);
+    assert.equal(invite.created, true);
+    assert.equal(invite.role.role, 'manager');
+    assert.equal(invite.role.status, 'pending');
+    assert.equal(invite.role.invitedPhone, '+15555550100');
+    assert.equal(invite.role.userId, null);
+    assert.equal(invite.role.maxAuthorizationCents, null);
 
     const rows = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
     assert.equal(rows.length, 1);
@@ -186,7 +188,9 @@ test('inviteInitialManager is idempotent for a repeat invite of the same not-yet
 
     const first = await inviteInitialManager(db, siteId, '+15555550100');
     const second = await inviteInitialManager(db, siteId, '+15555550100');
-    assert.equal(first.id, second.id);
+    assert.equal(first.created, true);
+    assert.equal(second.created, false);
+    assert.equal(first.role.id, second.role.id);
 
     const rows = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
     assert.equal(rows.length, 1, 'no duplicate pending row is inserted');
@@ -194,11 +198,13 @@ test('inviteInitialManager is idempotent for a repeat invite of the same not-yet
     // A different phone, or the same phone at a different site, is a genuinely
     // new invite and gets its own row.
     const otherPhone = await inviteInitialManager(db, siteId, '+15555550101');
-    assert.notEqual(otherPhone.id, first.id);
+    assert.equal(otherPhone.created, true);
+    assert.notEqual(otherPhone.role.id, first.role.id);
 
     const otherSiteId = await seedSite(db);
     const otherSite = await inviteInitialManager(db, otherSiteId, '+15555550100');
-    assert.notEqual(otherSite.id, first.id);
+    assert.equal(otherSite.created, true);
+    assert.notEqual(otherSite.role.id, first.role.id);
   } finally {
     await client.close();
   }

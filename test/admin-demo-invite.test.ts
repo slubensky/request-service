@@ -46,12 +46,14 @@ async function inviteAndListAsAdminConsoleWould(
   siteId: string,
   demoMode: boolean,
 ) {
-  const invited = await inviteInitialManager(db, siteId, PHONE);
+  const invited = (await inviteInitialManager(db, siteId, PHONE)).role;
   if (demoMode) {
     await issueDemoInviteCode(db, invited.id);
   }
   const siteList = await listSitesWithBathrooms(db);
-  const pendingIds = siteList.flatMap((entry) => entry.pendingInvites.map((i) => i.id));
+  const pendingIds = siteList.flatMap((entry) =>
+    entry.managers.filter((m) => m.status === 'pending').map((m) => m.id),
+  );
   const demoCodes = demoMode
     ? await unusedCodesForSiteRoles(db, pendingIds)
     : new Map<string, string>();
@@ -72,10 +74,10 @@ test('DEMO_MODE on: the admin console shows the code + accept link right after i
     const code = demoCodes.get(invited.id);
     assert.ok(code, 'a code was minted for the newly-created pending invite');
 
-    const html = renderAdminConsole(siteList, 'csrf-token', true, demoCodes);
-    // The invite itself (phone + role) is shown alongside its code and link.
+    const html = renderAdminConsole(siteList, 'csrf-token', demoCodes);
+    // The manager (phone + status) is shown alongside its code and accept link.
     assert.match(html, new RegExp(PHONE.replace('+', '\\+')));
-    assert.match(html, /manager/);
+    assert.match(html, /class="managers"/);
     assert.match(html, new RegExp(`Code: <code>${code}</code>`));
     assert.match(html, new RegExp(`/invite/accept\\?code=${code}`));
   } finally {
@@ -91,17 +93,21 @@ test('DEMO_MODE off: no code is minted and admin console markup is unchanged', a
 
     // No code exists at all -- the route never called issueDemoInviteCode.
     assert.equal(demoCodes.size, 0);
-    const pendingIds = siteList.flatMap((entry) => entry.pendingInvites.map((i) => i.id));
+    const pendingIds = siteList.flatMap((entry) =>
+      entry.managers.filter((m) => m.status === 'pending').map((m) => m.id),
+    );
     assert.equal((await unusedCodesForSiteRoles(db, pendingIds)).size, 0);
 
-    const demoOffHtml = renderAdminConsole(siteList, 'csrf-token', false, demoCodes);
-    // The pending-invites section itself does not render when DEMO_MODE is off.
+    const demoOffHtml = renderAdminConsole(siteList, 'csrf-token', demoCodes);
+    // No demo code or accept link renders when DEMO_MODE is off.
     assert.doesNotMatch(demoOffHtml, /invite-code/);
     assert.doesNotMatch(demoOffHtml, /\/invite\/accept/);
-    assert.doesNotMatch(demoOffHtml, /class="invites"/);
-    assert.doesNotMatch(demoOffHtml, /invite-phone/);
+    // The managers list itself DOES render (visibility) -- phone + a Revoke control.
+    assert.match(demoOffHtml, /class="managers"/);
+    assert.match(demoOffHtml, new RegExp(PHONE.replace('+', '\\+')));
+    assert.match(demoOffHtml, /Revoke/);
 
-    // Byte-for-byte identical to calling the pre-existing overload (defaults).
+    // Byte-for-byte identical to calling the no-demoCodes overload (empty map default).
     const legacyHtml = renderAdminConsole(siteList, 'csrf-token');
     assert.equal(demoOffHtml, legacyHtml);
   } finally {

@@ -8,7 +8,7 @@
  *
  * Coverage:
  *  (a) two pending invites for the same phone+site (including a mixed
- *      manager/assistant duplicate pair) -- redemption activates exactly one
+ *      manager/authorized_user duplicate pair) -- redemption activates exactly one
  *      and supersedes the rest, with no thrown error (the production analog
  *      of the reported HTTP 500);
  *  (b) a user who already holds a role at a site gracefully no-ops a stray
@@ -58,7 +58,7 @@ async function seedSite(db: TestDatabase['db'], name = 'Central Plaza'): Promise
 async function insertPendingInvite(
   db: TestDatabase['db'],
   siteId: string,
-  role: 'manager' | 'assistant',
+  role: 'manager' | 'authorized_user',
   invitedPhone: string,
   createdAt: Date,
 ): Promise<SiteRoleRow> {
@@ -79,7 +79,7 @@ test('(a) two pending manager invites for the same phone+site: redemption activa
   const { db, client } = await createTestDatabase();
   try {
     const siteId = await seedSite(db);
-    const earlier = await inviteInitialManager(db, siteId, PHONE);
+    const earlier = (await inviteInitialManager(db, siteId, PHONE)).role;
     const duplicate = await insertPendingInvite(
       db,
       siteId,
@@ -119,7 +119,7 @@ test('(a) two pending manager invites for the same phone+site: redemption activa
   }
 });
 
-test('(a) a mixed manager+assistant duplicate pair for the same phone+site still collapses to one role', async () => {
+test('(a) a mixed manager+authorized_user duplicate pair for the same phone+site still collapses to one role', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const siteId = await seedSite(db);
@@ -133,7 +133,7 @@ test('(a) a mixed manager+assistant duplicate pair for the same phone+site still
       PHONE,
       new Date(Date.now() - 60_000),
     );
-    await insertPendingInvite(db, siteId, 'assistant', PHONE, new Date());
+    await insertPendingInvite(db, siteId, 'authorized_user', PHONE, new Date());
 
     const user = await findOrCreateUserByCognitoSub(db, 'sub-mixed', PHONE);
     const bridged = await bridgePendingSiteRoles(db, user.id, PHONE);
@@ -165,7 +165,7 @@ test('(b) a user who already holds a role at the site: a stray pending duplicate
 
     // A stray pending invite for the same phone shows up later at the same
     // site (e.g. a manager re-invites this phone by mistake).
-    const stray = await inviteInitialManager(db, siteId, PHONE);
+    const stray = (await inviteInitialManager(db, siteId, PHONE)).role;
 
     const bridged = await bridgePendingSiteRoles(db, user.id, PHONE);
     assert.equal(bridged.length, 0, 'nothing new is bridged -- the user already has a role here');
@@ -198,13 +198,15 @@ test('(c) invite creation is idempotent for an existing pending phone+site+role 
   try {
     const siteId = await seedSite(db);
 
-    const firstManager = await inviteInitialManager(db, siteId, PHONE);
-    const secondManager = await inviteInitialManager(db, siteId, PHONE);
+    const firstManager = (await inviteInitialManager(db, siteId, PHONE)).role;
+    const secondManager = (await inviteInitialManager(db, siteId, PHONE)).role;
     assert.equal(firstManager.id, secondManager.id);
 
-    const firstAssistant = await inviteSiteMember(db, siteId, 'assistant', '+15555550199');
-    const secondAssistant = await inviteSiteMember(db, siteId, 'assistant', '+15555550199');
-    assert.equal(firstAssistant.id, secondAssistant.id);
+    const firstUser = (await inviteSiteMember(db, siteId, 'authorized_user', '+15555550199', 3000))
+      .role;
+    const secondUser = (await inviteSiteMember(db, siteId, 'authorized_user', '+15555550199', 9999))
+      .role;
+    assert.equal(firstUser.id, secondUser.id);
 
     const rows = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
     assert.equal(rows.length, 2, 'one row per genuinely distinct phone, no duplicates');
@@ -227,7 +229,7 @@ test('(d) regression: the normal single-invite accept + login-bridge path still 
   try {
     const siteId = await seedSite(db);
 
-    const managerInvite = await inviteInitialManager(db, siteId, PHONE);
+    const managerInvite = (await inviteInitialManager(db, siteId, PHONE)).role;
     const manager = await findOrCreateUserByCognitoSub(db, 'sub-solo-manager', PHONE);
     const managerBridged = await bridgePendingSiteRoles(db, manager.id, PHONE);
     assert.equal(managerBridged.length, 1);
@@ -240,20 +242,21 @@ test('(d) regression: the normal single-invite accept + login-bridge path still 
       true,
     );
 
-    const assistantPhone = '+15555550188';
-    const assistantInvite = await inviteSiteMember(db, siteId, 'assistant', assistantPhone);
-    const assistant = await findOrCreateUserByCognitoSub(db, 'sub-solo-assistant', assistantPhone);
-    const assistantBridged = await bridgePendingSiteRoles(db, assistant.id, assistantPhone);
-    assert.equal(assistantBridged.length, 1);
-    assert.equal(assistantBridged[0]?.id, assistantInvite.id);
-    assert.equal(assistantBridged[0]?.role, 'assistant');
-    // Linked, but still pending -- no self-elevation (unchanged from before this fix).
-    assert.equal(assistantBridged[0]?.status, 'pending');
-    assert.equal(assistantBridged[0]?.userId, assistant.id);
+    const userPhone = '+15555550188';
+    const userInvite = (await inviteSiteMember(db, siteId, 'authorized_user', userPhone, 3000))
+      .role;
+    const authorizedUser = await findOrCreateUserByCognitoSub(db, 'sub-solo-user', userPhone);
+    const userBridged = await bridgePendingSiteRoles(db, authorizedUser.id, userPhone);
+    assert.equal(userBridged.length, 1);
+    assert.equal(userBridged[0]?.id, userInvite.id);
+    assert.equal(userBridged[0]?.role, 'authorized_user');
+    // One-step: linked AND activated to authorized on accept (Phase 6).
+    assert.equal(userBridged[0]?.status, 'authorized');
+    assert.equal(userBridged[0]?.userId, authorizedUser.id);
 
     // Repeat authentication remains idempotent: nothing left to bridge.
     assert.equal((await bridgePendingSiteRoles(db, manager.id, PHONE)).length, 0);
-    assert.equal((await bridgePendingSiteRoles(db, assistant.id, assistantPhone)).length, 0);
+    assert.equal((await bridgePendingSiteRoles(db, authorizedUser.id, userPhone)).length, 0);
   } finally {
     await client.close();
   }

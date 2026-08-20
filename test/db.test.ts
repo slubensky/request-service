@@ -141,16 +141,16 @@ test('resolveSiteRole maps an authorized manager row, and authorize allows it', 
   }
 });
 
-test('a pending assistant role is resolved and denied self-authorization', async () => {
+test('a pending (not-yet-accepted) authorized_user role is resolved and denied self-authorization', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const { siteId, bathroomId } = await seedSite(db);
-    const [user] = await db.insert(users).values({ cognitoSub: 'sub-assistant' }).returning();
+    const [user] = await db.insert(users).values({ cognitoSub: 'sub-authorized-user' }).returning();
     assert.ok(user);
     await db.insert(siteRoles).values({
       siteId,
       userId: user.id,
-      role: 'assistant',
+      role: 'authorized_user',
       status: 'pending',
       maxAuthorizationCents: 5000,
     });
