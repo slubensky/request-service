@@ -25,6 +25,19 @@
 > `cancel_payment` were already fully specified in §7/§9 and are wired to routes for the
 > first time here. Per AGENTS.md spec policy, edit date/time recorded here.
 >
+> **Last edited:** 2026-08-19 21:30 UTC — Phase 3 (backlog items 3+4): documented **saved
+> (mock) payment methods** (new §4 entity `SitePaymentMethod`, new §9.4), the
+> **site-scoped-not-user-scoped** design decision and its rationale, a new **step-up
+> re-authentication** primitive (new §6.4, `sessionAuthenticatedWithin`) gating reuse of a
+> saved method to place a new hold, a `next`-redirect addition to `GET /auth/login` so
+> step-up re-authentication can return the caller to the QR page it interrupted, and a
+> **duplicate-active-request guard** preventing two concurrent non-terminal
+> `CleaningRequest`s for one bathroom. New HTTP surface at §11.7. New capability
+> `payment_method:save` (§7), granted to `manager`/`assistant` only, mirroring
+> `cleaning_request:create`. No PAN/CVV/expiry field of any kind is introduced anywhere —
+> the only payment-method UI action is "Add a payment method (mock)". Per AGENTS.md spec
+> policy, edit date/time recorded here.
+>
 > **Status:** Approved for Phase 0 build; Phase 1 manager invitation flow in review. Source of truth for coders; mirrors the reviewed Blueprint (`art_RUHUe0PF`, v0.3).
 
 ## 1. Purpose & scope
@@ -161,17 +174,18 @@ returned shape, same idempotency on repeat authentication.
 
 All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Payment fields are references only — the system never stores raw card data. Identity is anchored to a Cognito subject, never to a password.
 
-| Entity                       | Key fields                                                                          | Notes                                                                                                                                                             |
-| ---------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Site**                     | `name`, `address`, `timezone`, `currency`, `fixed_price_cents`, `terms`             | One billing configuration; owns Bathrooms.                                                                                                                        |
-| **Bathroom**                 | `site_id`, `label`, `status`                                                        | Belongs to exactly one Site; at most one active QRToken.                                                                                                          |
-| **QRToken**                  | `bathroom_id`, `token_hash`, `status`                                               | Stores a one-way hash of the token only; opaque and non-authorizing; replaceable/revocable.                                                                       |
-| **User**                     | `cognito_sub`, `phone`, `status`, `platform_role`                                   | Identity anchored to a Cognito subject; no passwords stored. `platform_role` ∈ {member, company_admin}, default `member`.                                         |
-| **SiteRole**                 | `user_id`, `site_id`, `role`, `status`, `max_authorization_cents`, `bathroom_scope` | Manager-created site authority; deny by default; distinguishes assistant from customer. `role` ∈ {manager, assistant}; `status` ∈ {pending, authorized, revoked}. |
-| **CleaningRequest**          | `bathroom_id`, `price_version`, `amount_cents`, `status`                            | Exactly one payment authorization per request in the MVP.                                                                                                         |
-| **PaymentAuthorization**     | `request_id`, `stripe_payment_intent_id`, `status`                                  | Manual-capture; created fresh per request; never reused.                                                                                                          |
-| **AssistantApprovalRequest** | `site_id`, `bathroom_id`, `price_version`, `amount`, `assistant_id`, `expires_at`   | Single-use; 5–15 minute expiry; bound values invalidate the approval on change.                                                                                   |
-| **PublicAlert**              | `bathroom_id`, `note`, `created_at`                                                 | Non-billable; no associated PaymentIntent or CleaningRequest.                                                                                                     |
+| Entity                       | Key fields                                                                          | Notes                                                                                                                                                                                  |
+| ---------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Site**                     | `name`, `address`, `timezone`, `currency`, `fixed_price_cents`, `terms`             | One billing configuration; owns Bathrooms.                                                                                                                                             |
+| **Bathroom**                 | `site_id`, `label`, `status`                                                        | Belongs to exactly one Site; at most one active QRToken.                                                                                                                               |
+| **QRToken**                  | `bathroom_id`, `token_hash`, `status`                                               | Stores a one-way hash of the token only; opaque and non-authorizing; replaceable/revocable.                                                                                            |
+| **User**                     | `cognito_sub`, `phone`, `status`, `platform_role`                                   | Identity anchored to a Cognito subject; no passwords stored. `platform_role` ∈ {member, company_admin}, default `member`.                                                              |
+| **SiteRole**                 | `user_id`, `site_id`, `role`, `status`, `max_authorization_cents`, `bathroom_scope` | Manager-created site authority; deny by default; distinguishes assistant from customer. `role` ∈ {manager, assistant}; `status` ∈ {pending, authorized, revoked}.                      |
+| **CleaningRequest**          | `bathroom_id`, `price_version`, `amount_cents`, `status`                            | Exactly one payment authorization per request in the MVP.                                                                                                                              |
+| **PaymentAuthorization**     | `request_id`, `stripe_payment_intent_id`, `status`                                  | Manual-capture; created fresh per request; never reused.                                                                                                                               |
+| **AssistantApprovalRequest** | `site_id`, `bathroom_id`, `price_version`, `amount`, `assistant_id`, `expires_at`   | Single-use; 5–15 minute expiry; bound values invalidate the approval on change.                                                                                                        |
+| **PublicAlert**              | `bathroom_id`, `note`, `created_at`                                                 | Non-billable; no associated PaymentIntent or CleaningRequest.                                                                                                                          |
+| **SitePaymentMethod**        | `site_id`, `gateway_token`, `display_label`, `created_by_user_id`                   | **Mock only** (§9.4); one per Site (unique on `site_id`) — belongs to the Site, not the User who added it. `display_label` is a fixed mock string, never a real-looking free-text PAN. |
 
 ### 4.1 Referential notes
 
@@ -179,6 +193,8 @@ All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Pa
 - `User.platform_role` is **platform-level** authority (cross-site, e.g. `company_admin`), orthogonal to the **site-scoped** authority carried by `SiteRole`. A `User` may hold `platform_role=company_admin` with zero, one, or many SiteRoles — the two are independent axes. `SiteRole.role` remains ∈ {manager, assistant} in all cases; Company Admin is never itself a `SiteRole.role` value.
 - `CleaningRequest.price_version` anchors the price used at authorization time so later `Site.fixed_price_cents` changes cannot retroactively alter an in-flight or historical request.
 - `PaymentAuthorization` is 1:1 with `CleaningRequest` in the MVP (no partial charges, no multiple holds per request).
+- `SitePaymentMethod.site_id` is unique — at most one saved method per Site in this phase (§9.4). `created_by_user_id` is an audit reference only; it does not change who the method belongs to (the Site) or who may use it (any authorized Manager/Assistant at that Site, per §7).
+- At most one non-terminal (`authorizing`/`authorized`) `CleaningRequest` may exist per `bathroom_id` at a time, enforced by a partial unique index (§9.4).
 
 ## 5. QR generation & resolution
 
@@ -268,11 +284,45 @@ the resulting code under `DEMO_MODE`; see the "Code minting & display" bullet be
 Testing mocks everything: codes and acceptance are exercised against the in-process PGlite
 database with no AWS, no Cognito, and no real SMS.
 
+### 6.4 Step-up re-authentication (recency check)
+
+Added in Phase 3 (§9.4) as a general primitive: some sensitive actions require not just a
+_valid_ session but a _recently established_ one — proof the caller authenticated (or
+re-authenticated) within a short window, not merely that a long-lived session cookie is
+still unexpired.
+
+- `sessionAuthenticatedWithin(session, windowSeconds)` (`src/auth/guard.ts`) answers this
+  from data the session already carries: `SessionPayload.iat` (§ session token shape) is
+  stamped the moment Cognito authentication completes and is re-stamped on **every** full
+  authentication (SMS OTP or passkey, both routed through the shared `/auth/callback`,
+  §6.1/§6.2) — so `now - iat` is exactly "time since last authentication." No new session
+  state, cookie, or column is introduced.
+- The **first consumer** of this primitive is §9.4's saved-payment-method reuse gate
+  (`POST /s/:token/authorize`), with a 5-minute window. It is a general-purpose helper, not
+  payment-specific, so a later feature needing the same "recently authenticated" property
+  can reuse it without inventing a parallel mechanism.
+- **`next` redirect on `GET /auth/login`.** To make a step-up prompt actually return the
+  caller to what they were doing, `GET /auth/login` now accepts an optional `next` query
+  parameter. It is honored **only** if it matches a strict allow-list shape —
+  `^/s/[A-Za-z0-9_-]+$`, exactly the QR scan path shape and nothing else (no scheme, no
+  `//` protocol-relative form) — and is then stored in a new short-lived HttpOnly cookie
+  (`rs_oauth_return_to`, same lifetime as the existing `rs_oauth_state` cookie).
+  `GET /auth/callback` (unchanged/shared across every auth factor, §6.1–§6.3) redirects
+  there instead of `/` once authentication completes, then clears the cookie. Any `next`
+  value that does not match the allow-list is ignored — this is a narrow, purpose-built
+  allow-list against open redirects, not a general redirect surface.
+  `GET /auth/passkey/register` does not accept `next` (out of scope — it remains a pure
+  identity action, §6.2) and always clears `rs_oauth_return_to` so a value set by an earlier
+  `GET /auth/login` call can never leak into that flow.
+
+Testing drives this through the same signed-session/injected-`nowSeconds` seams §6.1–§6.3
+already use — no live Cognito, no real clock dependency.
+
 ## 7. Authorization
 
 - **Deny-by-default, capability matrix.** Every state-changing endpoint is gated by an explicit capability matrix keyed by `(platform_role, SiteRole.role, SiteRole.status)`, scoped to the target Site (and `bathroom_scope` where applicable). A request is denied unless the matrix names an explicit allow for its endpoint given the caller's platform role and, where relevant, their SiteRole at the target Site.
 - **Platform-level-only capabilities.** Creating or editing a Site or Bathroom, issuing the initial QRToken, setting/managing the fixed price (price versions), and capturing/canceling a PaymentAuthorization gate on `platform_role=company_admin` **only** — no `SiteRole`, including `role=manager`, ever satisfies these checks.
-- **Site-scoped capabilities.** Creating a CleaningRequest, authorizing a hold, inviting/promoting/revoking a SiteRole, replacing a QRToken at a site, and approving an AssistantApprovalRequest require an explicit, active `SiteRole` check scoped to the relevant Site.
+- **Site-scoped capabilities.** Creating a CleaningRequest, authorizing a hold, saving a site's (mock) payment method, inviting/promoting/revoking a SiteRole, replacing a QRToken at a site, and approving an AssistantApprovalRequest require an explicit, active `SiteRole` check scoped to the relevant Site. `payment_method:save` (§9.4) is granted to `manager` and `assistant` — the same role set as `cleaning_request:create` — and, like it, is **not** held by `company_admin` on the platform axis: a Company Admin does not request cleanings and does not seed a site's payment method either.
 - The server **never trusts** UI state, QR contents, or any client-submitted claim about role or authority. Every authorization decision is re-derived server-side from the current `platform_role` and `SiteRole` record at request time.
 - Authorization checks precede any business logic (price lookup, Stripe call, etc.) — a request with insufficient authority fails closed before any side effect occurs.
 - `max_authorization_cents` bounds the amount a given SiteRole holder may authorize; requests exceeding this bound are rejected server-side regardless of what the client displayed.
@@ -334,6 +384,54 @@ idempotencyKey}) -> {gatewayId}`, `capture(gatewayId)`, `cancel(gatewayId)`. A f
   deferred with it) and Stripe webhook processing (§9.2's verified-webhook invariant applies
   once a real gateway exists; there is no webhook surface to secure yet because there is no
   external payment processor in this phase).
+
+### 9.4 Phase 3: saved (mock) payment method, repeat-request reuse, step-up re-auth
+
+Phase 3 lets an authorized Manager/Assistant save a **mock** payment method for their site
+and reuse it on later requests, and adds a duplicate-active-request guard. Still no Stripe:
+`PaymentGateway` (§9.3) is untouched — the mock gateway needs no card reference at all, and
+threading one through before a real gateway exists to consume it is deferred.
+
+- **`SitePaymentMethod` belongs to the Site, not the User** (§4). Decision and rationale
+  recorded in full in `docs/phase3-saved-payment-method-plan.md`; summary: this is a
+  facilities expense the site pays for, the rest of the payment model
+  (`fixed_price_cents`, `max_authorization_cents`) is already site-scoped, and a per-user
+  card would create a dangling-funding-source failure mode on staff turnover that a
+  site-owned record cannot have. At most one saved method per Site (`site_id` unique).
+- **No card-shaped UI, even mocked.** The only payment-method action is a single "Add a
+  payment method (mock)" button (`POST /s/:token/payment-method`, §11.7) that creates a
+  synthetic record server-side: a fixed mock `display_label` (e.g. `"Mock Visa •••• 4242"`)
+  and a `gateway_token` prefixed `mock_pm_` (never resembling a real Stripe payment-method
+  id) — no free-text PAN/CVV/expiry field exists anywhere in this phase, deliberately, to
+  avoid creating a UI pattern that invites real card collection later.
+- **Repeat-request reuse.** `GET /s/:token` (amended again, §11.7) now renders one of three
+  states for a caller who already clears `create_cleaning_request` (§7, unchanged gate):
+  no saved method → the add-method form; saved method + recently authenticated (§6.4) →
+  the authorize form (now also showing the saved method's mock label); saved method + stale
+  session → a re-authenticate prompt, no authorize button. `POST /s/:token/authorize`
+  independently re-derives and re-checks both conditions before ever calling the gateway —
+  the `GET` state is a convenience, never the enforcement point (same "authorization
+  precedes any business logic" principle as every other action in §7).
+- **Step-up re-authentication gates reuse, not addition.** `POST /s/:token/authorize`
+  requires the site to already have a saved method (`409` if not — "add a payment method
+  before authorizing a hold") **and** requires `sessionAuthenticatedWithin(session, 300)`
+  (§6.4) to hold (`401` — "re-authentication required" — otherwise, with a
+  `GET /auth/login?next=/s/:token` path back into the flow). This check runs uniformly on
+  every authorize against an existing saved method, including the very first authorize in
+  the same visit immediately after adding it — see
+  `docs/phase3-saved-payment-method-plan.md` for why no just-added exception exists.
+  `POST /s/:token/payment-method` itself carries no recency requirement — only _placing a
+  hold_ is gated, matching the literal scope of the requirement and creating no
+  money-movement bypass (adding a mock record moves no money by itself).
+- **Duplicate-active-request guard.** `createCleaningRequest` (`src/payments/service.ts`)
+  now rejects with `DuplicateActiveRequestError` (mapped to `409` by the route) if the
+  target bathroom already has a non-terminal (`authorizing`/`authorized`) `CleaningRequest`
+  — checked before any gateway call, per the "authorization/validation precedes side
+  effects" principle. A read-check-first plus a backstop partial unique index
+  (`cleaning_requests_bathroom_active_key` on `bathroom_id` `WHERE status IN
+('authorizing','authorized')`) closes the double-tap race the same way the existing §3.3
+  invite bridge closes its own concurrent-write race: a resulting Postgres unique-violation
+  is caught and mapped to the same clean error, never an unhandled `500`.
 
 ## 10. Assistant one-time approval
 
@@ -464,6 +562,39 @@ server-side through the deny-by-default matrix (§7); the amount is always serve
 price-history mechanism yet (`price:manage`, §7, remains specified but unwired to a route,
 as already noted for other not-yet-built capabilities). Revisit once price editing ships.
 
+### 11.7 Phase 3 HTTP surface — saved payment method, repeat request, step-up (implementation)
+
+Realizes §9.4 and §6.4. All authorization is re-derived server-side through the
+deny-by-default matrix (§7); nothing here is a new role.
+
+- `GET /s/:token` (amended a third time) — for a caller who clears `create_cleaning_request`
+  (§11.6's gate, unchanged), renders one of three states instead of always the authorize
+  form: no saved method → the "Add a payment method (mock)" form; saved method and
+  `sessionAuthenticatedWithin(session, 300)` holds (§6.4) → the authorize form, now showing
+  the saved method's mock label; saved method and that check fails → a re-authenticate
+  prompt linking to `GET /auth/login?next=/s/:token`, no authorize form rendered. Everyone
+  without site authority still gets the byte-identical neutral page (§11.2, unchanged).
+- `POST /s/:token/payment-method` — requires an authenticated session (`401` otherwise) and
+  the session-bound CSRF token like every other console mutation (§11.3); re-resolves the
+  token server-side, then gates on `save_payment_method` (siteId) via the matrix (`403` if
+  denied). Creates the site's saved method (`409` if one already exists — no silent
+  overwrite, no parallel create path). Renders whichever of the two saved-method `GET`
+  states above now applies, so "add, then authorize" is two clicks without a full page
+  navigation — without skipping the step-up check that immediately follows.
+- `POST /s/:token/authorize` (amended again) — after the existing `create_cleaning_request`
+  gate (§11.6, unchanged: session, token/price resolution, matrix check, all before any
+  side effect), two new checks precede the gateway call: `409` if the site has no saved
+  payment method yet, then `401` if `sessionAuthenticatedWithin(session, 300)` does not hold
+  (§6.4). On success, calls `createCleaningRequest` as before; a
+  `DuplicateActiveRequestError` (§9.4) is mapped to `409`, not a `500`.
+- `GET /auth/login` (amended) — accepts an optional `next` query parameter honored only
+  against the `^/s/[A-Za-z0-9_-]+$` allow-list (§6.4); stored in a new short-lived HttpOnly
+  `rs_oauth_return_to` cookie. `GET /auth/callback` (unchanged/shared across every auth
+  factor) redirects there instead of `/` once authentication completes, then clears the
+  cookie. `GET /auth/passkey/register` is unaffected except that it now also clears
+  `rs_oauth_return_to` on every call, so a value set by an earlier login attempt can never
+  carry into an enrollment redirect.
+
 ## 12. Security invariants
 
 | Invariant                      | Statement                                                                                                                                                                                                                                                         |
@@ -476,6 +607,9 @@ as already noted for other not-yet-built capabilities). Revisit once price editi
 | One-time approval binding      | Assistant approval is single-use and bound to site, bathroom, price version, amount, and assistant; changing any bound value invalidates it.                                                                                                                      |
 | Verified webhooks              | Stripe webhooks are signature-verified and processed idempotently to update payment status.                                                                                                                                                                       |
 | Managed secrets                | Stripe keys and Cognito/DB credentials live in AWS Secrets Manager; never hardcoded, never in logs or diffs.                                                                                                                                                      |
+| No card-shaped mock UI         | The only payment-method UI action is "Add a payment method (mock)" (§9.4); no free-text PAN/CVV/expiry field exists anywhere, even fake, to avoid a pattern that invites real card collection later.                                                              |
+| Step-up on reuse               | Reusing a saved (mock) payment method to place a new hold requires the session to have authenticated within the last 5 minutes (§6.4, §9.4); the server independently re-checks this on every `POST /s/:token/authorize`, not just in the UI.                     |
+| No concurrent duplicate holds  | At most one non-terminal `CleaningRequest` may exist per bathroom at a time, enforced by a read-check plus a partial unique index (§9.4); a race is a clean `409`, never an unhandled `500`.                                                                      |
 
 ## 13. Confirmed stack decisions
 
@@ -485,7 +619,7 @@ These decisions are locked pending final sign-off on the Blueprint (`art_RUHUe0P
 - **Deploy:** AWS via Terraform — App Runner (SSR), RDS/Aurora Serverless v2 PostgreSQL, Secrets Manager, ACM + Route 53, region `us-east-1`.
 - **Auth:** Amazon Cognito managed passwordless — SMS OTP + passkeys, via Cognito managed login (Hosted UI). Cognito owns authentication; the application server owns authorization (SiteRole).
 - **Identity vs. authority:** customer = no SiteRole; assistant/manager = manager-created SiteRole (pending/authorized); Company Admin = platform-level `platform_role=company_admin`, provisioned internally/seeded (or granted by an existing Company Admin), never via self-service, QR, or Cognito login. No self-service elevation to any of these (§3).
-- **Payments:** Stripe manual-capture PaymentIntents with idempotency keys; capture/cancel is Company-Admin/internal-backend only; server-derived price (§8, §9). **Phase 2/3 implement this against a mocked `PaymentGateway` (§9.3) — no Stripe SDK, no live keys, no real card collection or money movement — with the real Stripe integration tracked as a later, separate task behind the same interface.**
+- **Payments:** Stripe manual-capture PaymentIntents with idempotency keys; capture/cancel is Company-Admin/internal-backend only; server-derived price (§8, §9). **Phase 2/3 implement this against a mocked `PaymentGateway` (§9.3) — no Stripe SDK, no live keys, no real card collection or money movement — with the real Stripe integration tracked as a later, separate task behind the same interface.** Phase 3 additionally adds a site-scoped mock saved payment method with no card-shaped UI, a step-up re-authentication gate on reusing it (§6.4, §9.4), and a duplicate-active-request guard.
 - **Database:** Aurora Serverless v2 PostgreSQL with Drizzle ORM for typed, parameterized queries and migrations.
 - **Public alerts:** neutral "see staff" page only for MVP (§11).
 - **Delivery:** build and host in the sandbox first; PR into `main` and AWS deploy only after human review, per the Blueprint's sandbox-first build plan.
@@ -500,6 +634,27 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #007 — 2026-08-19T17:30:00-04:00
+
+Adds Phase 3 (product backlog items 3+4): a site-scoped **mock saved payment method**
+(new §4 entity `SitePaymentMethod`, new §9.4) with no card-shaped UI anywhere (the sole
+action is "Add a payment method (mock)"); a repeat-request flow where `GET /s/:token`
+skips straight to the authorize form once a site has a saved method; a new **step-up
+re-authentication** primitive (§6.4, `sessionAuthenticatedWithin`) gating _reuse_ of a
+saved method to place a new hold behind a 5-minute recency window, backed by a `next`-
+redirect addition to `GET /auth/login` (allow-listed to `^/s/[A-Za-z0-9_-]+$`) so the
+step-up prompt can return the caller to the page it interrupted; and a
+**duplicate-active-request guard** (`DuplicateActiveRequestError`, a partial unique index)
+preventing two concurrent non-terminal `CleaningRequest`s for one bathroom. New capability
+`payment_method:save` (§7), granted to `manager`/`assistant` only — not `company_admin` —
+mirroring `cleaning_request:create`. New HTTP surface at §11.7:
+`POST /s/:token/payment-method`, amended `GET /s/:token` (three states) and
+`POST /s/:token/authorize` (two new pre-gateway checks), amended `GET /auth/login`. The
+design decision that a saved method belongs to the Site rather than the User, and why the
+step-up window applies uniformly rather than exempting a just-added method, are recorded in
+full in `docs/phase3-saved-payment-method-plan.md`. `PaymentGateway` (§9.3) is unchanged —
+still mock-only, no Stripe SDK, no live keys, no real card collection or money movement.
 
 ### #006 — 2026-08-19T15:00:00-04:00
 

@@ -31,11 +31,24 @@ import { signSession } from './session.js';
 
 export const SESSION_COOKIE = 'rs_session';
 const STATE_COOKIE = 'rs_oauth_state';
+// Step-up re-authentication (SDD §6.4): where to send the caller back to once
+// authentication completes. Short-lived like the state cookie; only ever set to a value
+// that already passed `isSafeReturnPath`.
+const RETURN_TO_COOKIE = 'rs_oauth_return_to';
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
 const STATE_MAX_AGE_SECONDS = 600;
 
 function randomToken(): string {
   return randomBytes(16).toString('base64url');
+}
+
+/**
+ * Allow-list for the `next` redirect target (SDD §6.4): only the exact QR scan path shape
+ * -- no scheme, no protocol-relative `//`, nothing else -- so this can never become a
+ * general open-redirect surface. Anything that doesn't match is ignored, not sanitized.
+ */
+function isSafeReturnPath(value: string): boolean {
+  return /^\/s\/[A-Za-z0-9_-]+$/.test(value);
 }
 
 function redirect(res: ServerResponse, location: string, setCookies: string[] = []): void {
@@ -51,7 +64,7 @@ function sendStatus(res: ServerResponse, status: number, message: string): void 
   res.end(message);
 }
 
-function handleLogin(runtime: AuthRuntime, { res }: RouteContext): void {
+function handleLogin(runtime: AuthRuntime, { res, query }: RouteContext): void {
   if (!runtime.cognito) {
     sendStatus(res, 503, 'Authentication is not configured');
     return;
@@ -63,7 +76,19 @@ function handleLogin(runtime: AuthRuntime, { res }: RouteContext): void {
     sameSite: 'Lax',
     maxAge: STATE_MAX_AGE_SECONDS,
   });
-  redirect(res, buildAuthorizeUrl(runtime.cognito, state, nonce), [stateCookie]);
+  // Step-up re-authentication (SDD §6.4): only a `next` that clears the allow-list is
+  // carried through; anything else is dropped rather than trusted, and any stale value
+  // from an earlier login attempt is cleared so it can never leak into this one.
+  const next = query.next;
+  const returnToCookie =
+    next !== undefined && isSafeReturnPath(next)
+      ? serializeCookie(RETURN_TO_COOKIE, next, {
+          httpOnly: true,
+          sameSite: 'Lax',
+          maxAge: STATE_MAX_AGE_SECONDS,
+        })
+      : clearCookie(RETURN_TO_COOKIE);
+  redirect(res, buildAuthorizeUrl(runtime.cognito, state, nonce), [stateCookie, returnToCookie]);
 }
 
 async function handleCallback(runtime: AuthRuntime, ctx: RouteContext): Promise<void> {
@@ -106,7 +131,17 @@ async function handleCallback(runtime: AuthRuntime, ctx: RouteContext): Promise<
       sameSite: 'Lax',
       maxAge: SESSION_MAX_AGE_SECONDS,
     });
-    redirect(res, '/', [sessionCookie, clearCookie(STATE_COOKIE)]);
+    // Step-up re-authentication (SDD §6.4): return to the page that requested re-auth, if
+    // one was recorded and still passes the allow-list -- re-checked here even though only
+    // an already-validated value is ever stored, since this cookie is the sole source of
+    // truth for where to redirect. Falls back to '/' exactly as before this change.
+    const returnTo = parseCookies(req.headers.cookie)[RETURN_TO_COOKIE];
+    const destination = returnTo && isSafeReturnPath(returnTo) ? returnTo : '/';
+    redirect(res, destination, [
+      sessionCookie,
+      clearCookie(STATE_COOKIE),
+      clearCookie(RETURN_TO_COOKIE),
+    ]);
   } catch {
     // Do not leak verification detail to the client; identity failed to verify.
     sendStatus(res, 401, 'Authentication failed');
@@ -139,7 +174,13 @@ function handlePasskeyRegister(runtime: AuthRuntime, ctx: RouteContext): void {
     sameSite: 'Lax',
     maxAge: STATE_MAX_AGE_SECONDS,
   });
-  redirect(res, buildPasskeyRegistrationUrl(runtime.cognito, state, nonce), [stateCookie]);
+  // Passkey enrollment does not accept `next` (SDD §6.4) -- it is a pure identity action,
+  // not a step-up flow. Always clear any return-to value a prior login attempt may have
+  // left behind so it can never leak into this redirect.
+  redirect(res, buildPasskeyRegistrationUrl(runtime.cognito, state, nonce), [
+    stateCookie,
+    clearCookie(RETURN_TO_COOKIE),
+  ]);
 }
 
 function handleLogout(runtime: AuthRuntime, { res }: RouteContext): void {

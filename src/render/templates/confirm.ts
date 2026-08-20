@@ -19,17 +19,24 @@ export interface ConfirmPageOptions {
   amountCents: number;
   token: string;
   csrfToken: string;
+  /** The site's saved (mock) payment method label (SDD §9.4), e.g. "Mock Visa •••• 4242". */
+  savedMethodLabel: string;
 }
 
-/** The price-confirmation + authorize-hold page (SDD §11.6). */
+/** The price-confirmation + authorize-hold page (SDD §11.6, §11.7). Rendered only once the
+ * site has a saved (mock) payment method and the session clears the step-up recency check
+ * (SDD §6.4) -- see `renderAddPaymentMethodPage` / `renderReauthRequiredPage` for the other
+ * two states of `GET /s/:token`. */
 export function renderConfirmPage({
   siteName,
   amountCents,
   token,
   csrfToken,
+  savedMethodLabel,
 }: ConfirmPageOptions): string {
   const safeSiteName = escapeHtml(siteName);
   const safePrice = escapeHtml(formatCents(amountCents));
+  const safeMethod = escapeHtml(savedMethodLabel);
   const action = `/s/${encodeURIComponent(token)}/authorize`;
   const bodyHtml = `
       <header class="page-header">
@@ -39,7 +46,7 @@ export function renderConfirmPage({
       <section class="card">
         <p>Fixed price for this cleaning:</p>
         <p class="price">${safePrice}</p>
-        <p class="muted-note">Your card is placed on hold now and only charged after the cleaning is completed.</p>
+        <p class="muted-note">Charged to ${safeMethod} (mock). Your card is placed on hold now and only charged after the cleaning is completed.</p>
         <form class="stack-form" method="post" action="${escapeHtml(action)}" data-confirm-form>
           <button type="submit">Authorize hold for ${safePrice}</button>
         </form>
@@ -51,6 +58,80 @@ export function renderConfirmPage({
     csrfToken,
     scripts: ['/js/main.js', '/js/confirm.js'],
   });
+}
+
+export interface AddPaymentMethodPageOptions {
+  siteName: string;
+  amountCents: number;
+  token: string;
+  csrfToken: string;
+}
+
+/** First-time (mock) payment-method setup (SDD §9.4, §11.7): the *only* payment-method UI
+ * action in this app. Deliberately no free-text PAN/CVV/expiry field -- a single button
+ * creates a synthetic saved method server-side. Rendered when the site has no saved method
+ * yet, for a caller who already clears the site-authority gate for this bathroom. */
+export function renderAddPaymentMethodPage({
+  siteName,
+  amountCents,
+  token,
+  csrfToken,
+}: AddPaymentMethodPageOptions): string {
+  const safeSiteName = escapeHtml(siteName);
+  const safePrice = escapeHtml(formatCents(amountCents));
+  const action = `/s/${encodeURIComponent(token)}/payment-method`;
+  const bodyHtml = `
+      <header class="page-header">
+        <h1>Request a cleaning</h1>
+        <p class="subtitle">${safeSiteName}</p>
+      </header>
+      <section class="card">
+        <p>Fixed price for this cleaning:</p>
+        <p class="price">${safePrice}</p>
+        <p class="muted-note">This site has no saved payment method yet. Add one (a mock record only -- no card details are collected) to continue.</p>
+        <form class="stack-form" method="post" action="${escapeHtml(action)}" data-confirm-form>
+          <button type="submit">Add a payment method (mock)</button>
+        </form>
+      </section>
+  `;
+  return renderLayout({
+    title: 'Request a cleaning',
+    bodyHtml,
+    csrfToken,
+    scripts: ['/js/main.js', '/js/confirm.js'],
+  });
+}
+
+export interface ReauthRequiredPageOptions {
+  siteName: string;
+  token: string;
+  savedMethodLabel: string;
+}
+
+/** Step-up re-authentication prompt (SDD §6.4, §9.4): rendered instead of the authorize
+ * form when the site has a saved method but the session was not established within the
+ * recency window. No authorize action is offered here -- `POST /s/:token/authorize`
+ * independently re-checks the same condition regardless of what this page shows. */
+export function renderReauthRequiredPage({
+  siteName,
+  token,
+  savedMethodLabel,
+}: ReauthRequiredPageOptions): string {
+  const safeSiteName = escapeHtml(siteName);
+  const safeMethod = escapeHtml(savedMethodLabel);
+  const next = `/s/${encodeURIComponent(token)}`;
+  const loginHref = `/auth/login?next=${encodeURIComponent(next)}`;
+  const bodyHtml = `
+      <header class="page-header">
+        <h1>Request a cleaning</h1>
+        <p class="subtitle">${safeSiteName}</p>
+      </header>
+      <section class="card">
+        <p>Placing a hold on ${safeMethod} requires a recent sign-in. Please re-verify your identity to continue.</p>
+        <a class="button-link" href="${escapeHtml(loginHref)}">Re-authenticate</a>
+      </section>
+  `;
+  return renderLayout({ title: 'Request a cleaning', bodyHtml, scripts: ['/js/main.js'] });
 }
 
 /** The result page after a hold is successfully placed (SDD §9.1 step 2). */

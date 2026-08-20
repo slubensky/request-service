@@ -21,7 +21,10 @@ type SiteRoleTx = Parameters<Parameters<AppDatabase['transaction']>[0]>[0];
 // (site_id, user_id) is the constraint the bridge must never surface as a 500 (§3.3).
 const UNIQUE_VIOLATION = '23505';
 
-function isUniqueViolation(error: unknown): boolean {
+/** Postgres unique-violation detector, shared by every "conditional write + defensive
+ * catch" idiom in this codebase (the §3.3 invite bridge below, and the duplicate-active-
+ * request guard in src/payments/service.ts, SDD §9.4). */
+export function isUniqueViolation(error: unknown): boolean {
   return (
     typeof error === 'object' &&
     error !== null &&

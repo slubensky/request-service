@@ -13,10 +13,14 @@ import {
   cancelCleaningRequest,
   captureCleaningRequest,
   createCleaningRequest,
+  DuplicateActiveRequestError,
+  getSitePaymentMethod,
   InvalidPaymentStateError,
   listPendingCaptures,
   loadPaymentAuthorization,
   PaymentAuthorizationNotFoundError,
+  saveSitePaymentMethod,
+  SitePaymentMethodAlreadyExistsError,
 } from '../src/payments/service.js';
 import { createSite, addBathroom } from '../src/admin/service.js';
 import { cleaningRequests, paymentAuthorizations, users } from '../src/db/schema.js';
@@ -110,6 +114,10 @@ test('listPendingCaptures returns only requires_capture authorizations, newest l
   const { db, client } = await createTestDatabase();
   try {
     const { siteId, bathroomId, userId } = await seed(db);
+    // A second, distinct bathroom: the duplicate-active-request guard (SDD §9.4) forbids
+    // two concurrent non-terminal requests for the *same* bathroom, so two outstanding
+    // holds in this test must be for different bathrooms.
+    const secondBathroom = await addBathroom(db, siteId, 'Second floor');
     const gateway = new MockPaymentGateway();
     const { authorization: first } = await createCleaningRequest(db, gateway, {
       siteId,
@@ -119,7 +127,7 @@ test('listPendingCaptures returns only requires_capture authorizations, newest l
     });
     await createCleaningRequest(db, gateway, {
       siteId,
-      bathroomId,
+      bathroomId: secondBathroom.id,
       requestedByUserId: userId,
       amountCents: 4500,
     });
@@ -244,6 +252,101 @@ test('canceling an already-canceled authorization is rejected', async () => {
       () => cancelCleaningRequest(db, gateway, authorization.id),
       InvalidPaymentStateError,
     );
+  } finally {
+    await client.close();
+  }
+});
+
+test('createCleaningRequest rejects a second active request for the same bathroom before calling the gateway (SDD §9.4)', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, bathroomId, userId } = await seed(db);
+    let authorizeCalls = 0;
+    const countingGateway = new MockPaymentGateway();
+    const gateway = {
+      authorize: (input: Parameters<MockPaymentGateway['authorize']>[0]) => {
+        authorizeCalls += 1;
+        return countingGateway.authorize(input);
+      },
+      capture: countingGateway.capture.bind(countingGateway),
+      cancel: countingGateway.cancel.bind(countingGateway),
+    };
+
+    await createCleaningRequest(db, gateway, {
+      siteId,
+      bathroomId,
+      requestedByUserId: userId,
+      amountCents: 4500,
+    });
+    assert.equal(authorizeCalls, 1);
+
+    await assert.rejects(
+      () =>
+        createCleaningRequest(db, gateway, {
+          siteId,
+          bathroomId,
+          requestedByUserId: userId,
+          amountCents: 4500,
+        }),
+      DuplicateActiveRequestError,
+    );
+    // The rejected second attempt never reached the gateway.
+    assert.equal(authorizeCalls, 1);
+    assert.equal((await db.select().from(cleaningRequests)).length, 1);
+  } finally {
+    await client.close();
+  }
+});
+
+test('createCleaningRequest allows a new request for a bathroom once the prior one is terminal', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, bathroomId, userId } = await seed(db);
+    const gateway = new MockPaymentGateway();
+    const { authorization } = await createCleaningRequest(db, gateway, {
+      siteId,
+      bathroomId,
+      requestedByUserId: userId,
+      amountCents: 4500,
+    });
+    await cancelCleaningRequest(db, gateway, authorization.id);
+
+    await createCleaningRequest(db, gateway, {
+      siteId,
+      bathroomId,
+      requestedByUserId: userId,
+      amountCents: 4500,
+    });
+
+    assert.equal((await db.select().from(cleaningRequests)).length, 2);
+  } finally {
+    await client.close();
+  }
+});
+
+test('saveSitePaymentMethod creates a mock record; a second call for the same site is rejected', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, userId } = await seed(db);
+
+    assert.equal(await getSitePaymentMethod(db, siteId), null);
+
+    const saved = await saveSitePaymentMethod(db, siteId, userId);
+    assert.match(saved.gatewayToken, /^mock_pm_/);
+    assert.doesNotMatch(saved.gatewayToken, /^pm_/);
+    assert.equal(saved.displayLabel, 'Mock Visa •••• 4242');
+    assert.equal(saved.siteId, siteId);
+
+    const reloaded = await getSitePaymentMethod(db, siteId);
+    assert.equal(reloaded?.id, saved.id);
+
+    await assert.rejects(
+      () => saveSitePaymentMethod(db, siteId, userId),
+      SitePaymentMethodAlreadyExistsError,
+    );
+    // Still exactly one saved method for the site.
+    const reloadedAgain = await getSitePaymentMethod(db, siteId);
+    assert.equal(reloadedAgain?.id, saved.id);
   } finally {
     await client.close();
   }
