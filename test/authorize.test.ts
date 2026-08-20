@@ -14,7 +14,7 @@ const BATHROOM = 'bath-1';
 function role(overrides: Partial<ResolvedSiteRole>): ResolvedSiteRole {
   return {
     siteId: SITE,
-    role: 'assistant',
+    role: 'authorized_user',
     status: 'authorized',
     maxAuthorizationCents: 5000,
     bathroomScope: null,
@@ -37,7 +37,7 @@ const createRequest: Action = {
   amountCents: 5000,
 };
 
-// --- Site-scoped authority (manager / assistant) ---
+// --- Site-scoped authority (manager / authorized_user) ---
 
 test('a customer with no SiteRole is denied', () => {
   const decision = authorize(principal(null), createRequest);
@@ -49,7 +49,7 @@ test('a role for a different site cannot act across sites', () => {
   assert.deepEqual(decision, { allowed: false, reason: 'wrong_site' });
 });
 
-test('a pending assistant cannot self-authorize a paid request', () => {
+test('a pending (not-yet-accepted) authorized_user cannot self-authorize a paid request', () => {
   const decision = authorize(principal(role({ status: 'pending' })), createRequest);
   assert.deepEqual(decision, { allowed: false, reason: 'requires_authorized_status' });
 });
@@ -59,27 +59,32 @@ test('a revoked role is denied every action', () => {
   assert.deepEqual(decision, { allowed: false, reason: 'role_revoked' });
 });
 
-test('an authorized assistant within max is allowed', () => {
+test('an authorized_user within their limit is allowed', () => {
   const decision = authorize(principal(role({})), createRequest);
   assert.deepEqual(decision, { allowed: true });
 });
 
-test('an authorized manager within max is allowed', () => {
-  const decision = authorize(principal(role({ role: 'manager' })), createRequest);
+test('a manager is allowed at any amount (no limit), even with a null max', () => {
+  const decision = authorize(principal(role({ role: 'manager', maxAuthorizationCents: null })), {
+    type: 'create_cleaning_request',
+    siteId: SITE,
+    bathroomId: BATHROOM,
+    amountCents: 10_000_000,
+  });
   assert.deepEqual(decision, { allowed: true });
 });
 
-test('an amount above max_authorization_cents is denied', () => {
+test("an authorized_user's over-limit request is denied with exceeds_max_authorization (-> approval)", () => {
   const decision = authorize(principal(role({ maxAuthorizationCents: 4999 })), createRequest);
   assert.deepEqual(decision, { allowed: false, reason: 'exceeds_max_authorization' });
 });
 
-test('a role with no authorization limit cannot start a paid request', () => {
+test('an authorized_user with no limit set cannot start a paid request', () => {
   const decision = authorize(principal(role({ maxAuthorizationCents: null })), createRequest);
   assert.deepEqual(decision, { allowed: false, reason: 'no_authorization_limit' });
 });
 
-test('a bathroom outside an assistant scope is denied', () => {
+test('a bathroom outside an authorized_user scope is denied', () => {
   const decision = authorize(principal(role({ bathroomScope: ['other-bath'] })), createRequest);
   assert.deepEqual(decision, { allowed: false, reason: 'bathroom_out_of_scope' });
 });
@@ -89,19 +94,27 @@ test('a bathroom inside an explicit scope is allowed', () => {
   assert.deepEqual(decision, { allowed: true });
 });
 
-test('an authorized manager may invite, promote, and revoke assistants', () => {
+test('an authorized manager may invite, set an authorized user limit, and delete one', () => {
   const manager = principal(role({ role: 'manager' }));
-  for (const type of ['invite_site_role', 'promote_site_role', 'revoke_site_role'] as const) {
+  for (const type of ['invite_site_role', 'set_site_role_limit', 'delete_site_role'] as const) {
     assert.deepEqual(authorize(manager, { type, siteId: SITE }), { allowed: true });
   }
 });
 
-test('an authorized manager may approve an assistant request and view payments', () => {
+test('an authorized manager may approve an over-limit request and view payments', () => {
   const manager = principal(role({ role: 'manager' }));
-  assert.deepEqual(authorize(manager, { type: 'approve_assistant_request', siteId: SITE }), {
+  assert.deepEqual(authorize(manager, { type: 'approve_request', siteId: SITE }), {
     allowed: true,
   });
   assert.deepEqual(authorize(manager, { type: 'view_payment', siteId: SITE }), { allowed: true });
+});
+
+test('a manager cannot revoke a SiteRole (that is a Company Admin power now)', () => {
+  const manager = principal(role({ role: 'manager' }));
+  assert.deepEqual(authorize(manager, { type: 'revoke_site_role', siteId: SITE }), {
+    allowed: false,
+    reason: 'capability_not_granted',
+  });
 });
 
 test('an authorized manager may replace a QR token at their own site', () => {
@@ -113,12 +126,19 @@ test('an authorized manager may replace a QR token at their own site', () => {
   assert.deepEqual(decision, { allowed: true });
 });
 
-test('an assistant lacks the capability for manager-only actions', () => {
-  const decision = authorize(principal(role({ role: 'assistant' })), {
-    type: 'approve_assistant_request',
-    siteId: SITE,
-  });
-  assert.deepEqual(decision, { allowed: false, reason: 'capability_not_granted' });
+test('an authorized_user lacks manager-only membership/approval capabilities', () => {
+  const authorizedUser = principal(role({ role: 'authorized_user' }));
+  for (const type of [
+    'approve_request',
+    'invite_site_role',
+    'set_site_role_limit',
+    'delete_site_role',
+  ] as const) {
+    assert.deepEqual(authorize(authorizedUser, { type, siteId: SITE }), {
+      allowed: false,
+      reason: 'capability_not_granted',
+    });
+  }
 });
 
 test('a pending manager cannot yet act (status gate precedes capability)', () => {
@@ -173,6 +193,13 @@ test('a company_admin may onboard sites, bathrooms, QR, and price with no SiteRo
   );
   assert.deepEqual(authorize(admin, { type: 'manage_price', siteId: SITE }), { allowed: true });
   assert.deepEqual(authorize(admin, { type: 'invite_initial_manager', siteId: SITE }), {
+    allowed: true,
+  });
+});
+
+test('a company_admin may revoke a SiteRole (a Manager) cross-site', () => {
+  const admin = principal(null, 'company_admin');
+  assert.deepEqual(authorize(admin, { type: 'revoke_site_role', siteId: 'any-site' }), {
     allowed: true,
   });
 });

@@ -1,6 +1,6 @@
 /**
- * Authenticated price-confirmation flow for an authorized Manager/Assistant
- * scanning their site's QR (see SDD.md §9.3, §11.6). Every dynamic value is
+ * Authenticated price-confirmation flow for an authorized Manager or authorized
+ * user scanning their site's QR (see SDD.md §9.3, §11.6). Every dynamic value is
  * escaped before interpolation. Distinct from the neutral public-scan page
  * (render/templates/public-scan.ts), which stays byte-for-byte unchanged for
  * anyone without site authority -- these pages are only ever rendered for a
@@ -132,6 +132,65 @@ export function renderReauthRequiredPage({
       </section>
   `;
   return renderLayout({ title: 'Request a cleaning', bodyHtml, scripts: ['/js/main.js'] });
+}
+
+export interface RequestApprovalPageOptions {
+  siteName: string;
+  amountCents: number;
+  token: string;
+  csrfToken: string;
+}
+
+/** Over-limit request page (SDD §10, §11.6): rendered for an authorized user whose limit is
+ * below the site price. Submitting does not place a hold -- it records a pending approval a
+ * manager must grant. Reuses `data-confirm-form` so the same fetch/CSRF enhancement applies;
+ * the server (`POST /s/:token/authorize`) re-derives the over-limit condition, never this page. */
+export function renderRequestApprovalPage({
+  siteName,
+  amountCents,
+  token,
+  csrfToken,
+}: RequestApprovalPageOptions): string {
+  const safeSiteName = escapeHtml(siteName);
+  const safePrice = escapeHtml(formatCents(amountCents));
+  const action = `/s/${encodeURIComponent(token)}/authorize`;
+  const bodyHtml = `
+      <header class="page-header">
+        <h1>Request a cleaning</h1>
+        <p class="subtitle">${safeSiteName}</p>
+      </header>
+      <section class="card">
+        <p>Fixed price for this cleaning:</p>
+        <p class="price">${safePrice}</p>
+        <p class="muted-note">This is above your authorization limit, so a manager must approve it before the hold is placed. Submitting sends your request to a manager.</p>
+        <form class="stack-form" method="post" action="${escapeHtml(action)}" data-confirm-form>
+          <button type="submit">Request manager approval</button>
+        </form>
+      </section>
+  `;
+  return renderLayout({
+    title: 'Request a cleaning',
+    bodyHtml,
+    csrfToken,
+    scripts: ['/js/main.js', '/js/confirm.js'],
+  });
+}
+
+/** The page shown after an over-limit request is recorded (SDD §10): no hold yet, awaiting a
+ * manager's approval. Also the `GET /s/:token` state while a pending approval already exists. */
+export function renderApprovalPendingPage(siteName: string, amountCents: number): string {
+  const safeSiteName = escapeHtml(siteName);
+  const safePrice = escapeHtml(formatCents(amountCents));
+  const bodyHtml = `
+      <header class="page-header">
+        <h1>Awaiting manager approval</h1>
+        <p class="subtitle">${safeSiteName}</p>
+      </header>
+      <section class="card">
+        <p>Your request for a ${safePrice} cleaning is above your authorization limit and has been sent to a manager for approval. The hold is placed only once a manager approves.</p>
+      </section>
+  `;
+  return renderLayout({ title: 'Awaiting approval', bodyHtml, scripts: [] });
 }
 
 /** The result page after a hold is successfully placed (SDD §9.1 step 2). */

@@ -1,5 +1,15 @@
 # Software Design Document — QR Bathroom Cleaning Service Request App
 
+> **Last edited:** 2026-08-20 15:30 UTC — Phase 6: renamed the site role `assistant` →
+> **`authorized_user`** everywhere and reshaped site authority into two tiers — a `manager`
+> has no authorization limit and self-authorizes any amount, while an `authorized_user` has
+> a **manager-set limit** and any **over-limit** request is routed to a manager's approval
+> (rewrote §10 as `RequestApproval`). Made the invite **one-step** (the bridge activates
+> both roles on accept, no promotion), added manager `site_role:set_limit`/`site_role:delete`
+> and Company-Admin `site_role:revoke`, and made re-inviting an existing member idempotent
+> and reported as "already a member". Updated §2, §3, §4, §7, §9, §10, §11; changelog #008.
+> Per AGENTS.md spec policy, edit date/time recorded here.
+
 > **Last edited:** 2026-08-14 — reintroduced the platform-level **Company Admin** role, which an earlier edit had incorrectly dropped by asserting no admin role exists distinct from manager. This corrects §2–§5, §7, §9, §11, and §13 to match the original product spec: Company Admin is a cross-site internal operator (site/bathroom/QR/price creation, payment capture/cancel, initial-manager invite), while Site Manager remains site-scoped and cannot create sites or capture/cancel payments. Per AGENTS.md spec policy, edit date/time recorded here.
 
 > **Last edited:** 2026-08-14 15:00 UTC — Phase 0 vertical slice: documented the concrete HTTP surface for Company Admin onboarding (§11.1) and the privacy-safe public scan endpoint (§11.2), and recorded that the optional public `PublicAlert` affordance is intentionally deferred for this slice (see §11.3). No role-model or data-model change; the slice reuses the merged schema and the deny-by-default capability matrix (§7) unchanged. Per AGENTS.md spec policy, edit date/time recorded here.
@@ -62,7 +72,7 @@ An authorized requester scans, authenticates passwordlessly, sees the exact fixe
 - Site-scoped roles and deny-by-default authorization.
 - Fixed-price display and confirmation.
 - Stripe payment-method collection, manual-capture authorization, capture/cancel, and webhook processing.
-- Assistant one-time approval and promotion.
+- Notifications (SMS/email) of an invite or of a pending over-limit approval.
 - Public visitor alert (neutral, non-billable).
 
 ### 1.5 Out of scope (MVP) — non-goals
@@ -82,12 +92,12 @@ Any of the above may become in-scope in a later phase, but each requires a spec 
 
 ## 2. Actors & roles
 
-| Actor                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Company Admin**             | Platform-level internal operator (`platform_role=company_admin`) — **not** a SiteRole, and not scoped to any single site. Creates and edits Sites and Bathrooms, issues/replaces QRTokens, sets and manages the fixed price (price versions), invites the _initial_ Manager for a new Site, and triggers payment capture/cancel (internal backend). Does **not** request cleanings and does **not** authorize card holds.            |
-| **Manager**                   | Site-scoped (SiteRole `role=manager`). Requests cleaning and authorizes fixed-price holds at their site, approves assistant one-time requests, invites/promotes/revokes assistants **and additional managers** at their site, views full payment details for their site, and may replace the QR at their own site. **Cannot** create Sites or Bathrooms and **cannot** capture or cancel payments — those are Company Admin actions. |
-| **Assistant**                 | Site staff invited by a manager. Has a SiteRole with status `pending` or `authorized`. Can initiate cleaning requests within their authorized limits once `authorized`; while `pending`, can only initiate a request that requires a manager's one-time approval.                                                                                                                                                                    |
-| **Customer / public visitor** | Anyone who scans a bathroom QR and has no SiteRole for that site — whether unauthenticated or authenticated via Cognito. Sees only the neutral public page; can optionally leave a non-billable alert.                                                                                                                                                                                                                               |
+| Actor                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Company Admin**             | Platform-level internal operator (`platform_role=company_admin`) — **not** a SiteRole, and not scoped to any single site. Creates and edits Sites and Bathrooms, issues/replaces QRTokens, sets and manages the fixed price (price versions), invites the _initial_ Manager for a new Site, and triggers payment capture/cancel (internal backend). Does **not** request cleanings and does **not** authorize card holds.                                                                                                                                                                                           |
+| **Manager**                   | Site-scoped (SiteRole `role=manager`). Requests cleaning and authorizes fixed-price holds at their site with **no authorization limit**, approves an authorized user's over-limit request, invites members (authorized users **and additional managers**) at their site, changes an authorized user's limit, deletes an authorized user, views full payment details for their site, and may replace the QR at their own site. **Cannot** create Sites or Bathrooms and **cannot** capture or cancel payments — those are Company Admin actions. A manager's own SiteRole is created and revoked by a Company Admin. |
+| **Authorized user**           | Site staff invited by a manager in a single step (SiteRole `role=authorized_user`). Active the moment they accept the invite (no separate promotion step). Initiates cleaning requests and self-authorizes a hold **up to their manager-set authorization limit**; a request **above** that limit is held as a pending approval until a **manager approves** it. Cannot invite, manage, or approve other members.                                                                                                                                                                                                   |
+| **Customer / public visitor** | Anyone who scans a bathroom QR and has no SiteRole for that site — whether unauthenticated or authenticated via Cognito. Sees only the neutral public page; can optionally leave a non-billable alert.                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 No other roles exist in the MVP. There is no customer account tier.
 
@@ -104,7 +114,7 @@ These are deliberately separate systems, and authorization never follows automat
 
 ### 3.1 No self-service elevation
 
-There is **no self-service path** from customer to assistant:
+There is **no self-service path** from customer to authorized user:
 
 - Verifying a phone number or enrolling a passkey through Cognito never grants site authority. It only confirms identity.
 - Possessing or scanning a QR code grants nothing — the QR resolves to a bathroom, not to a role.
@@ -112,31 +122,30 @@ There is **no self-service path** from customer to assistant:
 
 ### 3.2 Resolution table
 
-| Who                                   | What the server finds                                                                      | Can start a paid request?                                                                                                                                                       |
-| ------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Customer / public visitor             | Authenticated (or anonymous) identity with **no SiteRole** for this site                   | No — neutral "see staff" page; optional non-billable alert                                                                                                                      |
-| Invited assistant, not yet authorized | **Pending** SiteRole (`role=assistant, status=pending`) created by a manager inviting them | No self-authorize — can only initiate a request that needs a manager's one-time approval                                                                                        |
-| Authorized assistant                  | `role=assistant, status=authorized`                                                        | Yes, within limits (`max_authorization_cents`)                                                                                                                                  |
-| Manager                               | `role=manager`, active, with `max_authorization_cents`                                     | Yes, up to the authorized amount                                                                                                                                                |
-| Company Admin                         | `platform_role=company_admin` (no SiteRole needed at any site)                             | No — does not request cleanings or authorize holds; instead creates Sites/Bathrooms, issues/replaces QR, sets price, invites the initial Manager, and captures/cancels payments |
+| Who                              | What the server finds                                                            | Can start a paid request?                                                                                                                                                       |
+| -------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Customer / public visitor        | Authenticated (or anonymous) identity with **no SiteRole** for this site         | No — neutral "see staff" page; optional non-billable alert                                                                                                                      |
+| Invited member, not yet accepted | **Pending** SiteRole (`status=pending`, `user_id=null`) created by inviting them | No — confers nothing until the invitee accepts (authenticates) and the §3.3 bridge links + activates it                                                                         |
+| Authorized user                  | `role=authorized_user, status=authorized`, with `max_authorization_cents`        | Yes up to their limit; a request **above** the limit is held for a manager's approval (§10)                                                                                     |
+| Manager                          | `role=manager`, active (`max_authorization_cents = null`, unlimited)             | Yes, any amount — no authorization limit                                                                                                                                        |
+| Company Admin                    | `platform_role=company_admin` (no SiteRole needed at any site)                   | No — does not request cleanings or authorize holds; instead creates Sites/Bathrooms, issues/replaces QR, sets price, invites the initial Manager, and captures/cancels payments |
 
-### 3.3 The bridge: invite → pending → linked
+### 3.3 The bridge: invite → pending → active
 
-1. A manager invites an assistant by identifier (e.g., phone number). This creates a **pending SiteRole** — a record that exists before the invitee has ever authenticated.
-2. When the invitee authenticates that same identifier through Cognito (SMS OTP or passkey enrollment), the server links the pending SiteRole to the resulting Cognito subject / `User` record.
-3. Only at that point does the invitee become a known-but-not-yet-authorized assistant (`status=pending`, now linked to an identity). A manager subsequently promotes them to `authorized` (see §9, Assistant workflow).
-4. **No invite means no SiteRole means customer.** There is no code path that creates a SiteRole except an explicit manager action.
+1. A manager invites a member (an authorized user or an additional manager) by identifier (e.g., phone number). This creates a **pending SiteRole** — a record that exists before the invitee has ever authenticated, carrying the role and, for an authorized user, the manager-set `max_authorization_cents`.
+2. When the invitee authenticates that same identifier through Cognito (SMS OTP or passkey enrollment), the server links the pending SiteRole to the resulting Cognito subject / `User` record **and activates it** (`status` → `authorized`).
+3. From that point the invitee is an active member at the site: a manager, or an authorized user who can request service (self-authorizing up to their limit, with over-limit requests routed to a manager's approval, §10). There is no separate promotion step.
+4. **No invite means no SiteRole means customer.** There is no code path that creates a SiteRole except an explicit manager (or, for the initial manager, Company Admin) action.
 
 This bridge is the only route by which a SiteRole comes to exist for a given identity. It is never inferred from a QR scan, a Cognito login, or any client-submitted claim.
 
-The same bridge bootstraps the very first Manager for a new Site: a **Company Admin** invites the initial Manager by identifier during onboarding, creating a pending `role=manager` SiteRole; when the invitee authenticates that identifier through Cognito, the server links it exactly as in steps 1–2 above. From that point forward, that Manager can invite/promote/revoke assistants at their own site — but only a Company Admin can create the next Site or invite the next Site's initial Manager.
+The same bridge bootstraps the very first Manager for a new Site: a **Company Admin** invites the initial Manager by identifier during onboarding, creating a pending `role=manager` SiteRole; when the invitee authenticates that identifier through Cognito, the server links it exactly as in steps 1–2 above. From that point forward, that Manager can invite additional members (authorized users or additional managers), set an authorized user's limit, and delete an authorized user at their own site — but only a Company Admin can create the next Site, invite the next Site's initial Manager, or revoke a Manager.
 
 **Activation on authentication (updated 2026-08-14, 00:00 UTC).** Step 2's link is performed automatically in the authenticated Cognito callback (`src/auth/routes.ts` → `bridgePendingSiteRoles`, `src/db/access.ts`). On each successful authentication the server matches the ID token's **verified** phone number against not-yet-linked pending invites (`invited_phone` equal, `user_id IS NULL`, `status=pending`) and sets `user_id` to the resolved `User`. The two invited roles differ in outcome, matching the resolution table (§3.2):
 
-- A `role=manager` invite is **activated** in the same step (`status` → `authorized`), so the invitee becomes an active Manager and the Site becomes operable per §11.1.
-- A `role=assistant` invite is only **linked** (`status` stays `pending`); it confers no authority until a manager explicitly promotes it (§9/§10). Auto-authorizing an assistant on login would be self-elevation and is deliberately not done.
+- **Both** `role=manager` and `role=authorized_user` invites are **activated** in the same step (`status` → `authorized`) when the invitee accepts. A manager invite makes the Site operable per §11.1; an authorized-user invite makes that person able to request service immediately (self-authorizing up to their manager-set limit, §7/§10). This is not self-elevation: the authority-granting act is the manager's explicit invite; accepting only binds the invitee's verified identity to the SiteRole the manager already created. There is no "linked-but-still-pending" state — `pending` means only "invited, not yet accepted."
 
-A token whose verified identifier matches no pending invite links nothing and grants nothing — deny-by-default (§7) is unchanged, and Company Admin (`platform_role`) authority is orthogonal and untouched. The operation is **idempotent**: repeat authentication re-matches only still-unlinked pending invites, so an already-activated Manager role or an already-linked Assistant role is left exactly as it was. All authority continues to be re-derived from the SiteRole matrix (§7) on every request — activation grants authority only because the resolved role is now `authorized`, never through any parallel code path.
+A token whose verified identifier matches no pending invite links nothing and grants nothing — deny-by-default (§7) is unchanged, and Company Admin (`platform_role`) authority is orthogonal and untouched. The operation is **idempotent**: repeat authentication re-matches only still-unlinked pending invites, so an already-activated role (manager or authorized user) is left exactly as it was. All authority continues to be re-derived from the SiteRole matrix (§7) on every request — activation grants authority only because the resolved role is now `authorized`, never through any parallel code path.
 
 **Resilient bridge contract (added 2026-08-16, PR-D).** The unique index
 `site_roles_site_user_key` on `(site_id, user_id)` permits at most one SiteRole per user
@@ -174,26 +183,26 @@ returned shape, same idempotency on repeat authentication.
 
 All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Payment fields are references only — the system never stores raw card data. Identity is anchored to a Cognito subject, never to a password.
 
-| Entity                       | Key fields                                                                          | Notes                                                                                                                                                                                  |
-| ---------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Site**                     | `name`, `address`, `timezone`, `currency`, `fixed_price_cents`, `terms`             | One billing configuration; owns Bathrooms.                                                                                                                                             |
-| **Bathroom**                 | `site_id`, `label`, `status`                                                        | Belongs to exactly one Site; at most one active QRToken.                                                                                                                               |
-| **QRToken**                  | `bathroom_id`, `token_hash`, `status`                                               | Stores a one-way hash of the token only; opaque and non-authorizing; replaceable/revocable.                                                                                            |
-| **User**                     | `cognito_sub`, `phone`, `status`, `platform_role`                                   | Identity anchored to a Cognito subject; no passwords stored. `platform_role` ∈ {member, company_admin}, default `member`.                                                              |
-| **SiteRole**                 | `user_id`, `site_id`, `role`, `status`, `max_authorization_cents`, `bathroom_scope` | Manager-created site authority; deny by default; distinguishes assistant from customer. `role` ∈ {manager, assistant}; `status` ∈ {pending, authorized, revoked}.                      |
-| **CleaningRequest**          | `bathroom_id`, `price_version`, `amount_cents`, `status`                            | Exactly one payment authorization per request in the MVP.                                                                                                                              |
-| **PaymentAuthorization**     | `request_id`, `stripe_payment_intent_id`, `status`                                  | Manual-capture; created fresh per request; never reused.                                                                                                                               |
-| **AssistantApprovalRequest** | `site_id`, `bathroom_id`, `price_version`, `amount`, `assistant_id`, `expires_at`   | Single-use; 5–15 minute expiry; bound values invalidate the approval on change.                                                                                                        |
-| **PublicAlert**              | `bathroom_id`, `note`, `created_at`                                                 | Non-billable; no associated PaymentIntent or CleaningRequest.                                                                                                                          |
-| **SitePaymentMethod**        | `site_id`, `gateway_token`, `display_label`, `created_by_user_id`                   | **Mock only** (§9.4); one per Site (unique on `site_id`) — belongs to the Site, not the User who added it. `display_label` is a fixed mock string, never a real-looking free-text PAN. |
+| Entity                   | Key fields                                                                             | Notes                                                                                                                                                                                                                                                                                                      |
+| ------------------------ | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Site**                 | `name`, `address`, `timezone`, `currency`, `fixed_price_cents`, `terms`                | One billing configuration; owns Bathrooms.                                                                                                                                                                                                                                                                 |
+| **Bathroom**             | `site_id`, `label`, `status`                                                           | Belongs to exactly one Site; at most one active QRToken.                                                                                                                                                                                                                                                   |
+| **QRToken**              | `bathroom_id`, `token_hash`, `status`                                                  | Stores a one-way hash of the token only; opaque and non-authorizing; replaceable/revocable.                                                                                                                                                                                                                |
+| **User**                 | `cognito_sub`, `phone`, `status`, `platform_role`                                      | Identity anchored to a Cognito subject; no passwords stored. `platform_role` ∈ {member, company_admin}, default `member`.                                                                                                                                                                                  |
+| **SiteRole**             | `user_id`, `site_id`, `role`, `status`, `max_authorization_cents`, `bathroom_scope`    | Manager-created site authority; deny by default; distinguishes an authorized user from a customer. `role` ∈ {manager, authorized_user}; `status` ∈ {pending, authorized, revoked}. `max_authorization_cents` is `null` (unlimited) for a manager and a manager-set positive amount for an authorized user. |
+| **CleaningRequest**      | `bathroom_id`, `price_version`, `amount_cents`, `status`                               | Exactly one payment authorization per request in the MVP.                                                                                                                                                                                                                                                  |
+| **PaymentAuthorization** | `request_id`, `stripe_payment_intent_id`, `status`                                     | Manual-capture; created fresh per request; never reused.                                                                                                                                                                                                                                                   |
+| **RequestApproval**      | `site_id`, `bathroom_id`, `price_version`, `amount`, `requester_user_id`, `expires_at` | An authorized user's **over-limit** request awaiting a manager's approval. Single-use; 15-minute expiry; bound values invalidate the approval on change (§10).                                                                                                                                             |
+| **PublicAlert**          | `bathroom_id`, `note`, `created_at`                                                    | Non-billable; no associated PaymentIntent or CleaningRequest.                                                                                                                                                                                                                                              |
+| **SitePaymentMethod**    | `site_id`, `gateway_token`, `display_label`, `created_by_user_id`                      | **Mock only** (§9.4); one per Site (unique on `site_id`) — belongs to the Site, not the User who added it. `display_label` is a fixed mock string, never a real-looking free-text PAN.                                                                                                                     |
 
 ### 4.1 Referential notes
 
 - `SiteRole.user_id` may reference a `User` created before or after the invite — the pending SiteRole exists independent of the `User` row until the bridge (§3.3) links them.
-- `User.platform_role` is **platform-level** authority (cross-site, e.g. `company_admin`), orthogonal to the **site-scoped** authority carried by `SiteRole`. A `User` may hold `platform_role=company_admin` with zero, one, or many SiteRoles — the two are independent axes. `SiteRole.role` remains ∈ {manager, assistant} in all cases; Company Admin is never itself a `SiteRole.role` value.
+- `User.platform_role` is **platform-level** authority (cross-site, e.g. `company_admin`), orthogonal to the **site-scoped** authority carried by `SiteRole`. A `User` may hold `platform_role=company_admin` with zero, one, or many SiteRoles — the two are independent axes. `SiteRole.role` remains ∈ {manager, authorized_user} in all cases; Company Admin is never itself a `SiteRole.role` value.
 - `CleaningRequest.price_version` anchors the price used at authorization time so later `Site.fixed_price_cents` changes cannot retroactively alter an in-flight or historical request.
 - `PaymentAuthorization` is 1:1 with `CleaningRequest` in the MVP (no partial charges, no multiple holds per request).
-- `SitePaymentMethod.site_id` is unique — at most one saved method per Site in this phase (§9.4). `created_by_user_id` is an audit reference only; it does not change who the method belongs to (the Site) or who may use it (any authorized Manager/Assistant at that Site, per §7).
+- `SitePaymentMethod.site_id` is unique — at most one saved method per Site in this phase (§9.4). `created_by_user_id` is an audit reference only; it does not change who the method belongs to (the Site) or who may use it (any authorized Manager or authorized user at that Site, per §7).
 - At most one non-terminal (`authorizing`/`authorized`) `CleaningRequest` may exist per `bathroom_id` at a time, enforced by a partial unique index (§9.4).
 
 ## 5. QR generation & resolution
@@ -270,9 +279,9 @@ the resulting code under `DEMO_MODE`; see the "Code minting & display" bullet be
   invite's `invited_phone` (`findOrCreateUserByCognitoSub`, §6.1's persistence contract),
   then runs the **existing `bridgePendingSiteRoles` (§3.3) verbatim**. There is no parallel
   activation code path: the outcome is therefore identical to production — a `manager`
-  invite is activated (`status → authorized`, the Site becomes operable per §11.1) while an
-  `assistant` invite is only linked (`status` stays `pending`, no self-elevation until a
-  manager promotes it, §9/§10). The server then issues the same signed session cookie the
+  invite is activated (`status → authorized`, the Site becomes operable per §11.1) and an
+  `authorized_user` invite is likewise activated (`status → authorized`, the invitee can
+  request service, self-authorizing up to their limit, §7/§10). The server then issues the same signed session cookie the
   Cognito callback issues (§6.1), so the accepter continues authenticated as that verified
   identity, and renders a result page reflecting the outcome.
 - **Single-use.** The code is marked used at claim time; a second submission of the same
@@ -321,11 +330,11 @@ already use — no live Cognito, no real clock dependency.
 ## 7. Authorization
 
 - **Deny-by-default, capability matrix.** Every state-changing endpoint is gated by an explicit capability matrix keyed by `(platform_role, SiteRole.role, SiteRole.status)`, scoped to the target Site (and `bathroom_scope` where applicable). A request is denied unless the matrix names an explicit allow for its endpoint given the caller's platform role and, where relevant, their SiteRole at the target Site.
-- **Platform-level-only capabilities.** Creating or editing a Site or Bathroom, issuing the initial QRToken, setting/managing the fixed price (price versions), and capturing/canceling a PaymentAuthorization gate on `platform_role=company_admin` **only** — no `SiteRole`, including `role=manager`, ever satisfies these checks.
-- **Site-scoped capabilities.** Creating a CleaningRequest, authorizing a hold, saving a site's (mock) payment method, inviting/promoting/revoking a SiteRole, replacing a QRToken at a site, and approving an AssistantApprovalRequest require an explicit, active `SiteRole` check scoped to the relevant Site. `payment_method:save` (§9.4) is granted to `manager` and `assistant` — the same role set as `cleaning_request:create` — and, like it, is **not** held by `company_admin` on the platform axis: a Company Admin does not request cleanings and does not seed a site's payment method either.
+- **Platform-level-only capabilities.** Creating or editing a Site or Bathroom, issuing the initial QRToken, setting/managing the fixed price (price versions), capturing/canceling a PaymentAuthorization, and **revoking a SiteRole (`site_role:revoke`)** gate on `platform_role=company_admin` — a Company Admin revokes a Manager. (`site_role:revoke` is the one capability held on _both_ axes: cross-site for a Company Admin, and — historically — at-site for a Manager; in this phase only the Company Admin uses it, since a Manager instead _deletes_ an authorized user, below.) No `SiteRole` satisfies the other platform-only checks, including `role=manager`.
+- **Site-scoped capabilities.** Creating a CleaningRequest, authorizing a hold, saving a site's (mock) payment method, inviting a SiteRole (`site_role:invite`), setting an authorized user's limit (`site_role:set_limit`), deleting an authorized user (`site_role:delete`), replacing a QRToken at a site, and approving an over-limit request (`request:approve`) require an explicit, active `SiteRole` check scoped to the relevant Site. `cleaning_request:create` and `payment_method:save` (§9.4) are granted to `manager` and `authorized_user`; `site_role:invite`, `site_role:set_limit`, `site_role:delete`, and `request:approve` are granted to `manager` only. None is held by `company_admin` on the platform axis: a Company Admin does not request cleanings, seed a site's payment method, or manage a site's day-to-day membership.
 - The server **never trusts** UI state, QR contents, or any client-submitted claim about role or authority. Every authorization decision is re-derived server-side from the current `platform_role` and `SiteRole` record at request time.
 - Authorization checks precede any business logic (price lookup, Stripe call, etc.) — a request with insufficient authority fails closed before any side effect occurs.
-- `max_authorization_cents` bounds the amount a given SiteRole holder may authorize; requests exceeding this bound are rejected server-side regardless of what the client displayed.
+- **`max_authorization_cents` bounds a paid request by role.** A `manager` has no limit (`null` = unlimited) and may authorize any amount directly. An `authorized_user` may self-authorize only up to their limit; a request **above** the limit is not denied outright but routed to a manager's approval (§10) — the hold is placed only once a manager grants it. A request is never authorized above the limit on the authorized user's own authority, regardless of what the client displayed.
 
 ## 8. Pricing
 
@@ -340,7 +349,7 @@ The payment authorization lifecycle is the heart of the system: **authorize a ho
 ### 9.1 Flow
 
 1. **Confirm.** The authorized requester scans the QR, authenticates via Cognito (passkey or OTP), and confirms the server-derived fixed price.
-2. **Authorize.** The Site Manager (or an authorized/one-time-approved assistant) triggers the hold; the server creates a Stripe **manual-capture PaymentIntent** with a request-specific **idempotency key**. The `CleaningRequest` row is created only after the hold succeeds — a failed authorization creates no CleaningRequest and no PaymentAuthorization. The Site Manager and assistants can authorize a hold but can never capture or cancel one.
+2. **Authorize.** The Site Manager (any amount), an authorized user (up to their limit), or a manager granting an authorized user's over-limit approval (§10) triggers the hold; the server creates a Stripe **manual-capture PaymentIntent** with a request-specific **idempotency key**. The `CleaningRequest` row is created only after the hold succeeds — a failed authorization creates no CleaningRequest and no PaymentAuthorization. Managers and authorized users can authorize a hold but can never capture or cancel one.
 3. **Capture.** Only a **Company Admin** or internal operations/backend logic (`platform_role=company_admin`) may trigger a capture or a cancel, only after a completion action is recorded, and never for more than the originally authorized amount. No SiteRole — including `role=manager` — can capture or cancel.
 4. **Recover.**
    - Cancellation, triggered only by a **Company Admin** or internal backend logic, releases the hold (Stripe PaymentIntent canceled; `PaymentAuthorization.status` updated accordingly).
@@ -387,7 +396,7 @@ idempotencyKey}) -> {gatewayId}`, `capture(gatewayId)`, `cancel(gatewayId)`. A f
 
 ### 9.4 Phase 3: saved (mock) payment method, repeat-request reuse, step-up re-auth
 
-Phase 3 lets an authorized Manager/Assistant save a **mock** payment method for their site
+Phase 3 lets an authorized Manager or authorized user save a **mock** payment method for their site
 and reuse it on later requests, and adds a duplicate-active-request guard. Still no Stripe:
 `PaymentGateway` (§9.3) is untouched — the mock gateway needs no card reference at all, and
 threading one through before a real gateway exists to consume it is deferred.
@@ -433,14 +442,31 @@ threading one through before a real gateway exists to consume it is deferred.
   invite bridge closes its own concurrent-write race: a resulting Postgres unique-violation
   is caught and mapped to the same clean error, never an unhandled `500`.
 
-## 10. Assistant one-time approval
+## 10. Over-limit approval for authorized users
 
-An assistant with a **pending** SiteRole cannot self-authorize a paid request. Instead:
+An **authorized user** may self-authorize a hold up to their `max_authorization_cents`
+(§7). A request **above** that limit is not placed on the authorized user's own authority;
+instead it is held for a manager's approval:
 
-- The assistant's action creates an `AssistantApprovalRequest`, bound to a specific `site_id`, `bathroom_id`, `price_version`, `amount`, and `assistant_id`.
-- The approval is **single-use** and expires **5–15 minutes** after creation.
-- **Changing any bound value invalidates the approval** — e.g., if the site's price changes, or a different bathroom or amount is implied, the previously issued approval can no longer be exercised and a new one must be created.
-- Only a manager for that site can grant the approval. Granting it authorizes exactly the one bound request; it does not promote the assistant's SiteRole to `authorized` (promotion is a separate, explicit manager action — see the Blueprint's build plan, Phase 4/5).
+- The authorized user's over-limit `POST /s/:token/authorize` creates a `RequestApproval`
+  bound to a specific `site_id`, `bathroom_id`, `price_version`, `amount`, and
+  `requester_user_id`, with `status=pending`. No PaymentIntent and no `CleaningRequest` is
+  created at this point — nothing moves until a manager approves.
+- The approval is **single-use** and expires **15 minutes** after creation.
+- **Changing any bound value invalidates the approval** — if the site's price version
+  changes (a new fixed price), or a different bathroom or amount is implied, the previously
+  issued approval can no longer be exercised and a new one must be created.
+- Only a **manager** for that site can grant the approval (`request:approve`). Granting it
+  re-validates the binding (not expired; the site's current fixed price still equals the
+  bound amount), then places the hold via the normal authorization path (§9.1 step 2, mock
+  gateway, duplicate-active guard) and marks the approval `used`. The site must already have
+  a saved (mock) payment method (§9.4) — `409` otherwise. The scan-page step-up recency
+  check (§6.4) is a control on the self-service scan-and-authorize path; it is not re-imposed
+  on this deliberate console management action (like admin capture/cancel, which also carry
+  no step-up). A manager has no authorization limit, so a manager may approve any amount.
+  Granting an approval authorizes exactly the one bound request; it does not change the
+  authorized user's `max_authorization_cents` — a manager adjusts a limit explicitly (§11.4).
+- A `manager`'s own request is never routed here — a manager self-authorizes directly.
 
 ## 11. Onboarding & public visitor flow
 
@@ -454,18 +480,18 @@ A new Site enters the system only through a Company Admin, in this order:
 4. **Set the fixed price** (`fixed_price_cents`, establishing the first `price_version`; §8).
 5. **Invite the initial Manager** by identifier, creating a pending `role=manager` SiteRole (§3.3) — the invitee becomes an active Manager once they authenticate through Cognito and the bridge links their identity. Idempotent like the Site Manager invitation flow (§11.4): a repeat invite of the same not-yet-linked phone at the same Site returns the existing pending record rather than inserting a duplicate row, so the §3.3 bridge never faces two pending invites for the same phone+site+role from this path.
 
-Only a Company Admin can perform steps 1–4; no Site, Bathroom, QRToken, or price can exist without one. Step 5 is the last Company Admin action required before the Site is operable — all subsequent day-to-day requesting, hold authorization, and assistant management happen under the Manager's own SiteRole.
+Only a Company Admin can perform steps 1–4; no Site, Bathroom, QRToken, or price can exist without one. Step 5 is the last Company Admin action required before the Site is operable — all subsequent day-to-day requesting, hold authorization, and member management (inviting authorized users, adjusting their limits, deleting them) happen under the Manager's own SiteRole. A Company Admin may additionally **revoke a Manager** at any site (`site_role:revoke`; §7).
 
 ### 11.2 Public visitor flow
 
 - A visitor scan by anyone **without authorized site authority at the resolved site** —
-  whether anonymous, authenticated with no SiteRole, a not-yet-authorized (`pending`)
-  assistant, or a manager/assistant authorized at a _different_ site — always resolves to a
+  whether anonymous, authenticated with no SiteRole, an invited-but-not-yet-accepted
+  (`pending`) member, or a manager/authorized user authorized at a _different_ site — always resolves to a
   **generic, neutral page**: "Need this restroom cleaned? Notify staff."
 - This page **never reveals**: price, billing status, manager identity, request queue, or history.
 - The visitor may optionally submit a **non-billable `PublicAlert`** — this never creates a PaymentIntent, a CleaningRequest, or any payment obligation.
 - **Pre-activation privacy:** if a Site has not yet had a manager activate it, a scan still shows the same neutral page — it does not disclose that the site lacks a manager, which would otherwise leak operational state to an unauthenticated visitor.
-- **Authorized callers see more, deliberately.** A caller who already holds an authorized `manager`/`assistant` SiteRole at the resolved site — the _only_ case this applies to — sees the price-confirmation flow (§9.3, §11.6) instead. This is not a weakening of the invariant above: it requires authority the matrix (§7) already grants independent of the QR, the same authority that already lets a manager replace the QR at their own site (§5). Nothing is revealed to anyone who lacks that authority.
+- **Authorized callers see more, deliberately.** A caller who already holds an authorized `manager`/`authorized_user` SiteRole at the resolved site — the _only_ case this applies to — sees the price-confirmation flow (§9.3, §11.6) instead. This is not a weakening of the invariant above: it requires authority the matrix (§7) already grants independent of the QR, the same authority that already lets a manager replace the QR at their own site (§5). Nothing is revealed to anyone who lacks that authority.
 
 ### 11.3 Phase 0 HTTP surface (implementation)
 
@@ -475,8 +501,9 @@ The Phase 0 vertical slice realizes the flows above with these routes; all autho
 - `POST /admin/sites` — create a Site with `name`, `address`, `timezone`, `currency`, and `fixed_price_cents` (gated on `site:create`).
 - `POST /admin/sites/:siteId/bathrooms` — add a Bathroom to a Site (gated on `bathroom:create`).
 - `POST /admin/sites/:siteId/bathrooms/:bathroomId/qr` — issue a fresh opaque QRToken, revoking any prior active token for that Bathroom (gated on `qr_token:issue`). The raw token is rendered once into an inline SVG QR encoding the public scan URL; only its one-way hash is persisted (§5).
-- `POST /admin/sites/:siteId/managers` — invite the initial Site Manager by phone, creating a pending `role=manager` SiteRole (gated on `site_role:invite_initial_manager`; §3.3).
-- `GET /s/:token` — public scan resolution. Rate-limited hash lookup (§5), then a neutral "see staff" page (§11.2) **for any caller without authorized site authority at the resolved site**. For that population the response is byte-for-byte identical whether the token is active, revoked, or unknown, whether or not the Site has an activated manager, and whether or not the caller is authenticated — no oracle. It creates no PaymentIntent and writes no data. (An authorized Manager/Assistant at the resolved site instead sees the price-confirmation flow — §9.3, §11.6; that population is the sole, deliberate exception, per §11.2.)
+- `POST /admin/sites/:siteId/managers` — invite the initial Site Manager by phone, creating a pending `role=manager` SiteRole (gated on `site_role:invite_initial_manager`; §3.3). Idempotent and reported as such (§11.4): re-inviting a phone that already holds a non-revoked SiteRole at the site inserts no row and signals "already a member".
+- `POST /admin/sites/:siteId/roles/:roleId/revoke` — (Phase 6) revoke a SiteRole (in practice a Manager) at `:siteId`, setting `status=revoked` (gated on `site_role:revoke`, held by `company_admin` on the platform axis; §7). The target's `site_id` is re-derived from `:roleId` server-side and checked against `:siteId` before the gate. A revoked role confers no authority and cannot be redeemed by the bridge again (§3.3).
+- `GET /s/:token` — public scan resolution. Rate-limited hash lookup (§5), then a neutral "see staff" page (§11.2) **for any caller without authorized site authority at the resolved site**. For that population the response is byte-for-byte identical whether the token is active, revoked, or unknown, whether or not the Site has an activated manager, and whether or not the caller is authenticated — no oracle. It creates no PaymentIntent and writes no data. (An authorized Manager or authorized user at the resolved site instead sees the price-confirmation flow — §9.3, §11.6; that population is the sole, deliberate exception, per §11.2.)
 
 All onboarding `POST`s are state-changing and therefore require the existing session-bound CSRF token (§ CSRF guard); the Company Admin console submits them via a small progressive-enhancement ES module that echoes the token in the `x-csrf-token` header. The public scan page loads no such requirement and ships ~0 KB JS.
 
@@ -485,28 +512,41 @@ All onboarding `POST`s are state-changing and therefore require the existing ses
 ### 11.4 Phase 1 HTTP surface — Site Manager invitation flow (implementation)
 
 This slice generalizes the Company Admin's initial-manager invite (§11.1, §11.3) so an
-authorized Site Manager can invite additional members — another manager or an assistant —
-to their own site. It reuses the `invite_site_role` action / `site_role:invite` capability
-that the matrix (§7) already grants to an authorized `role=manager` SiteRole at its own
-site; Company Admin authority (`invite_initial_manager`) is unchanged and orthogonal.
+authorized Site Manager can invite additional members — another manager or an authorized
+user — to their own site, and (Phase 6) manage their authorized users. It reuses the
+`invite_site_role` action / `site_role:invite` capability that the matrix (§7) already
+grants to an authorized `role=manager` SiteRole at its own site; Company Admin authority
+(`invite_initial_manager`) is unchanged and orthogonal.
 
 - `GET /manager` — Site Manager console. Requires an authenticated session; lists every
   Site where the caller holds an `authorized` `role=manager` SiteRole, each with its
-  pending invites and an invite form. This is a self-scoped read (filtered by the caller's
-  own `user_id`), so an authenticated customer or assistant simply sees an empty console —
-  never another manager's sites.
+  members (managers and authorized users, by status), its pending over-limit approvals, and
+  an invite form. This is a self-scoped read (filtered by the caller's own `user_id`), so
+  an authenticated customer or authorized user simply sees an empty console — never another
+  manager's sites.
 - `POST /manager/sites/:siteId/invites` — invite a user by phone as `manager` or
-  `assistant` at `:siteId`, creating a pending SiteRole (`user_id=null`, `status=pending`;
-  gated on `site_role:invite`, scoped to `:siteId`). A repeat invite for the same
-  not-yet-linked phone at the same site is idempotent (returns the existing pending/
-  authorized record rather than a duplicate row). Rate-limited per authenticated user
-  (same fixed-window primitive as §11.3's public scan limiter) since no SMS cost bounds
-  invite volume in this phase. **This phase persists a DB record only — no SMS/OTP is
-  sent.** Delivery and the invite-bridge link to a Cognito identity on first login (§3.3)
-  are separate, later tasks.
+  `authorized_user` at `:siteId`, creating a pending SiteRole (`user_id=null`,
+  `status=pending`; gated on `site_role:invite`, scoped to `:siteId`). For an
+  `authorized_user` an **authorization limit** (`max_authorization_cents`, a positive whole
+  number of cents) is required and stored on the pending row; a `manager` invite stores
+  `null` (unlimited). A repeat invite for the same phone at the same site is **idempotent
+  and reported as such**: if any non-revoked SiteRole (pending _or_ accepted) already exists
+  for that phone at the site, no row is inserted and the response signals "already a member"
+  rather than "invited". Rate-limited per authenticated user. **This phase persists a DB
+  record only — no SMS/OTP is sent.**
+- `POST /manager/sites/:siteId/roles/:roleId/limit` — change an authorized user's
+  `max_authorization_cents` (gated on `site_role:set_limit`; positive amount required).
+  Rejects a target that is not an `authorized_user` at `:siteId`.
+- `POST /manager/sites/:siteId/roles/:roleId/delete` — delete an authorized user, removing
+  their SiteRole row (gated on `site_role:delete`). Works whether the invite is still
+  pending or already accepted; rejects a target that is not an `authorized_user` at
+  `:siteId` (a manager is revoked by a Company Admin, §11.1).
+- `POST /manager/approvals/:id/approve` — grant a pending over-limit `RequestApproval`
+  (gated on `request:approve`, resolved against the approval's own `site_id`), placing the
+  hold per §10.
 
-The invite `POST` is state-changing and therefore requires the same session-bound CSRF
-token as the Company Admin console (§11.3); the manager console submits it via the same
+Every `POST` here is state-changing and requires the same session-bound CSRF token as the
+Company Admin console (§11.3); the manager console submits them via the same
 progressive-enhancement pattern (`x-csrf-token` header), inert without JS.
 
 ### 11.5 Phase 1 HTTP surface — passkey (WebAuthn) enrollment (implementation)
@@ -537,17 +577,23 @@ server-side through the deny-by-default matrix (§7); the amount is always serve
 (§8); nothing here is a new capability or role.
 
 - `GET /s/:token` (amended) — as §11.3, with one addition: if the caller has a valid
-  session **and** an authorized `manager`/`assistant` SiteRole at the resolved site **and**
-  the site's current price is within their `max_authorization_cents`, the response is a
-  price-confirmation page (site name, exact fixed price, an authorize form) instead of the
-  neutral page. Anyone else gets the unchanged, byte-identical neutral page (§11.2).
+  session **and** an authorized `manager`/`authorized_user` SiteRole at the resolved site,
+  the response is a price-confirmation page (site name, exact fixed price, an authorize
+  form) instead of the neutral page. For an authorized user whose limit is below the site
+  price, the form is labeled "Request approval" (the hold is placed only after a manager
+  approves, §10) rather than "Authorize hold". Anyone else gets the unchanged, byte-identical
+  neutral page (§11.2).
 - `POST /s/:token/authorize` — requires an authenticated session (`401` otherwise);
   re-resolves the token and the site's current price server-side, then gates on
   `create_cleaning_request` (siteId, bathroomId, that server-derived amount) via the
-  matrix. On success, creates the hold via the gateway (§9.3) and, only once it succeeds,
+  matrix. On an allow, creates the hold via the gateway (§9.3) and, only once it succeeds,
   the `CleaningRequest` (`status=authorized`) and `PaymentAuthorization`
-  (`status=requires_capture`) rows, then renders a confirmation page. State-changing, so it
-  requires the same session-bound CSRF token as every other console mutation (§11.3).
+  (`status=requires_capture`) rows, then renders a confirmation page. **If the matrix denies
+  solely because the amount exceeds an `authorized_user`'s limit (`exceeds_max_authorization`),
+  the route instead records a pending `RequestApproval` (§10) and renders an "awaiting
+  manager approval" page — no hold, no `CleaningRequest`.** Any other denial is the usual
+  `403`. State-changing, so it requires the same session-bound CSRF token as every other
+  console mutation (§11.3).
 - `GET /admin/payments` — Company-Admin-only (`payment:view`-equivalent platform access;
   gated the same way onboarding is, on `platform_role=company_admin`) listing of every
   outstanding (`requires_capture`) `PaymentAuthorization` with its `CleaningRequest`.
@@ -597,19 +643,19 @@ deny-by-default matrix (§7); nothing here is a new role.
 
 ## 12. Security invariants
 
-| Invariant                      | Statement                                                                                                                                                                                                                                                         |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity ≠ authority           | Cognito authentication proves who a user is; only a manager-created SiteRole grants site authority, and only internal provisioning grants `platform_role=company_admin`. No self-service path elevates a customer to an assistant, a manager, or a Company Admin. |
-| Authorize by capability matrix | Every state-changing endpoint validates against a capability matrix keyed by `(platform_role, SiteRole.role, SiteRole.status)`, scoped to the target site. Deny by default; never trust UI, QR contents, or client claims.                                        |
-| Fresh hold each time           | Every paid request creates a new PaymentIntent. A prior hold is never reused for another bathroom or request.                                                                                                                                                     |
-| No raw card data               | Card entry happens only in Stripe's UI. The system stores Stripe IDs and never logs card data or client secrets.                                                                                                                                                  |
-| Opaque, hashed QR              | Random, non-sequential tokens; only a one-way hash is stored; resolution is rate-limited; tags are revocable/replaceable.                                                                                                                                         |
-| One-time approval binding      | Assistant approval is single-use and bound to site, bathroom, price version, amount, and assistant; changing any bound value invalidates it.                                                                                                                      |
-| Verified webhooks              | Stripe webhooks are signature-verified and processed idempotently to update payment status.                                                                                                                                                                       |
-| Managed secrets                | Stripe keys and Cognito/DB credentials live in AWS Secrets Manager; never hardcoded, never in logs or diffs.                                                                                                                                                      |
-| No card-shaped mock UI         | The only payment-method UI action is "Add a payment method (mock)" (§9.4); no free-text PAN/CVV/expiry field exists anywhere, even fake, to avoid a pattern that invites real card collection later.                                                              |
-| Step-up on reuse               | Reusing a saved (mock) payment method to place a new hold requires the session to have authenticated within the last 5 minutes (§6.4, §9.4); the server independently re-checks this on every `POST /s/:token/authorize`, not just in the UI.                     |
-| No concurrent duplicate holds  | At most one non-terminal `CleaningRequest` may exist per bathroom at a time, enforced by a read-check plus a partial unique index (§9.4); a race is a clean `409`, never an unhandled `500`.                                                                      |
+| Invariant                      | Statement                                                                                                                                                                                                                                                               |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity ≠ authority           | Cognito authentication proves who a user is; only a manager-created SiteRole grants site authority, and only internal provisioning grants `platform_role=company_admin`. No self-service path elevates a customer to an authorized user, a manager, or a Company Admin. |
+| Authorize by capability matrix | Every state-changing endpoint validates against a capability matrix keyed by `(platform_role, SiteRole.role, SiteRole.status)`, scoped to the target site. Deny by default; never trust UI, QR contents, or client claims.                                              |
+| Fresh hold each time           | Every paid request creates a new PaymentIntent. A prior hold is never reused for another bathroom or request.                                                                                                                                                           |
+| No raw card data               | Card entry happens only in Stripe's UI. The system stores Stripe IDs and never logs card data or client secrets.                                                                                                                                                        |
+| Opaque, hashed QR              | Random, non-sequential tokens; only a one-way hash is stored; resolution is rate-limited; tags are revocable/replaceable.                                                                                                                                               |
+| Over-limit approval binding    | An authorized user's over-limit request approval is single-use and bound to site, bathroom, price version, amount, and requester; changing any bound value invalidates it (§10). A manager (no limit) grants it; the hold is placed only on grant.                      |
+| Verified webhooks              | Stripe webhooks are signature-verified and processed idempotently to update payment status.                                                                                                                                                                             |
+| Managed secrets                | Stripe keys and Cognito/DB credentials live in AWS Secrets Manager; never hardcoded, never in logs or diffs.                                                                                                                                                            |
+| No card-shaped mock UI         | The only payment-method UI action is "Add a payment method (mock)" (§9.4); no free-text PAN/CVV/expiry field exists anywhere, even fake, to avoid a pattern that invites real card collection later.                                                                    |
+| Step-up on reuse               | Reusing a saved (mock) payment method to place a new hold requires the session to have authenticated within the last 5 minutes (§6.4, §9.4); the server independently re-checks this on every `POST /s/:token/authorize`, not just in the UI.                           |
+| No concurrent duplicate holds  | At most one non-terminal `CleaningRequest` may exist per bathroom at a time, enforced by a read-check plus a partial unique index (§9.4); a race is a clean `409`, never an unhandled `500`.                                                                            |
 
 ## 13. Confirmed stack decisions
 
@@ -618,8 +664,8 @@ These decisions are locked pending final sign-off on the Blueprint (`art_RUHUe0P
 - **Stack:** No-framework, no-bundler Lean SSR — TypeScript on Node.js, native `node:http` + a small typed router, server-rendered HTML via template literals, progressive-enhancement vanilla ES modules, hand-authored mobile-first CSS. Single-deployable modular monolith.
 - **Deploy:** AWS via Terraform — App Runner (SSR), RDS/Aurora Serverless v2 PostgreSQL, Secrets Manager, ACM + Route 53, region `us-east-1`.
 - **Auth:** Amazon Cognito managed passwordless — SMS OTP + passkeys, via Cognito managed login (Hosted UI). Cognito owns authentication; the application server owns authorization (SiteRole).
-- **Identity vs. authority:** customer = no SiteRole; assistant/manager = manager-created SiteRole (pending/authorized); Company Admin = platform-level `platform_role=company_admin`, provisioned internally/seeded (or granted by an existing Company Admin), never via self-service, QR, or Cognito login. No self-service elevation to any of these (§3).
-- **Payments:** Stripe manual-capture PaymentIntents with idempotency keys; capture/cancel is Company-Admin/internal-backend only; server-derived price (§8, §9). **Phase 2/3 implement this against a mocked `PaymentGateway` (§9.3) — no Stripe SDK, no live keys, no real card collection or money movement — with the real Stripe integration tracked as a later, separate task behind the same interface.** Phase 3 additionally adds a site-scoped mock saved payment method with no card-shaped UI, a step-up re-authentication gate on reusing it (§6.4, §9.4), and a duplicate-active-request guard.
+- **Identity vs. authority:** customer = no SiteRole; authorized_user/manager = manager-created SiteRole (pending until accepted, then authorized); Company Admin = platform-level `platform_role=company_admin`, provisioned internally/seeded (or granted by an existing Company Admin), never via self-service, QR, or Cognito login. No self-service elevation to any of these (§3).
+- **Payments:** Stripe manual-capture PaymentIntents with idempotency keys; capture/cancel is Company-Admin/internal-backend only; server-derived price (§8, §9). **Phase 2/3/6 implement this against a mocked `PaymentGateway` (§9.3) — no Stripe SDK, no live keys, no real card collection or money movement — with the real Stripe integration tracked as a later, separate task behind the same interface.** Phase 3 adds a site-scoped mock saved payment method with no card-shaped UI, a step-up re-authentication gate on reusing it (§6.4, §9.4), and a duplicate-active-request guard. Phase 6 adds the two-tier site model (manager = unlimited; authorized user = manager-set limit with over-limit requests routed to a manager's approval, §10).
 - **Database:** Aurora Serverless v2 PostgreSQL with Drizzle ORM for typed, parameterized queries and migrations.
 - **Public alerts:** neutral "see staff" page only for MVP (§11).
 - **Delivery:** build and host in the sandbox first; PR into `main` and AWS deploy only after human review, per the Blueprint's sandbox-first build plan.
@@ -634,6 +680,40 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #008 — 2026-08-20T15:30:00-04:00
+
+Phase 6 — **authorized users + over-limit manager approval**, reshaping the site
+authority model per the product owner's requests:
+
+- **Renames the site role `assistant` → `authorized_user` everywhere** (§2, §3, §4, §7,
+  §9–§11). The concept "assistant" is removed. Enum value renamed via a hand-authored
+  `ALTER TYPE ... RENAME VALUE` migration (drizzle-kit cannot infer an enum-value rename);
+  non-destructive, preserves rows.
+- **One-step invite (§3.3):** the invite bridge now activates **both** `manager` and
+  `authorized_user` to `authorized` on acceptance — no separate promotion step. `status`
+  collapses to `pending` = invited-not-yet-accepted, `authorized` = active, `revoked`.
+- **Two-tier authority (§7):** a `manager` has **no** authorization limit
+  (`max_authorization_cents = null` = unlimited) and self-authorizes any amount; an
+  `authorized_user` self-authorizes only up to a **manager-set limit** (required at invite),
+  and a request **above** the limit is routed to a manager's approval rather than denied.
+- **Over-limit approval (§10, rewritten):** the dormant `AssistantApprovalRequest` becomes
+  `RequestApproval` (`assistant_id` → `requester_user_id`); an over-limit
+  `POST /s/:token/authorize` records a pending, single-use, 15-min, price-bound approval,
+  and a manager's `POST /manager/approvals/:id/approve` re-validates and places the hold.
+- **Member management:** managers gain `site_role:set_limit` (change an authorized user's
+  limit) and `site_role:delete` (delete an authorized user); `site_role:promote` is retired
+  (no promotion step). Company Admin gains `site_role:revoke` (revoke a manager) on the
+  platform axis. New routes under §11.3 (admin) and §11.4 (manager).
+- **Idempotent invite messaging (§11.1/§11.4):** re-inviting a phone that already holds any
+  non-revoked SiteRole at the site inserts no row and is reported as "already a member"
+  rather than "invited", closing the duplicate-row path that also affected already-accepted
+  members.
+
+Security posture is unchanged in principle: authority still flows only from an explicit
+manager/admin action re-derived server-side through the deny-by-default matrix (§7); the
+one-step invite is not self-elevation (the manager's invite is the granting act). Still
+mock-only — no Stripe SDK, keys, or real card collection.
 
 ### #007 — 2026-08-19T17:30:00-04:00
 

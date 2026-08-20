@@ -9,9 +9,10 @@
  *
  * Coverage: the amended "no oracle" invariant (SDD §11.2/§11.3) -- neutral
  * page stays byte-identical for anonymous, authenticated-no-role, pending
- * assistant, and wrong-site manager; only an authorized manager/assistant at
- * the resolved site sees the confirm page; the authorize POST creates rows
- * only for an authorized, CSRF-cleared, authenticated caller.
+ * (not-yet-accepted) member, and wrong-site manager; only an authorized
+ * manager/authorized user at the resolved site sees the confirm page; the
+ * authorize POST creates rows only for an authorized, CSRF-cleared, authenticated
+ * caller.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -85,7 +86,7 @@ async function withRunningServer<T>(
   }
 }
 
-test('GET /s/:token: anonymous, no-role, pending-assistant, and wrong-site-manager callers all get the byte-identical neutral page', async () => {
+test('GET /s/:token: anonymous, no-role, pending-member, and wrong-site-manager callers all get the byte-identical neutral page', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const { rawToken, siteId } = await seedSiteAndToken(db);
@@ -100,11 +101,11 @@ test('GET /s/:token: anonymous, no-role, pending-assistant, and wrong-site-manag
     const customerId = await insertUser(db, 'sub-customer');
     const { cookie: customerCookie } = sessionAndCsrf(customerId);
 
-    const pendingAssistantId = await insertUser(db, 'sub-pending');
+    const pendingMemberId = await insertUser(db, 'sub-pending');
     await db
       .insert(siteRoles)
-      .values({ siteId, userId: pendingAssistantId, role: 'assistant', status: 'pending' });
-    const { cookie: pendingCookie } = sessionAndCsrf(pendingAssistantId);
+      .values({ siteId, userId: pendingMemberId, role: 'authorized_user', status: 'pending' });
+    const { cookie: pendingCookie } = sessionAndCsrf(pendingMemberId);
 
     const otherManagerId = await insertUser(db, 'sub-other-manager');
     await db.insert(siteRoles).values({
@@ -231,7 +232,7 @@ test('GET /s/:token: a saved payment method and a stale session shows a re-authe
   }
 });
 
-test('GET /s/:token: an authorized manager whose limit is below the price still sees the neutral page', async () => {
+test('GET /s/:token: a manager is unlimited -- a tiny limit still shows the price-confirmation flow', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
@@ -250,7 +251,38 @@ test('GET /s/:token: an authorized manager whose limit is below the price still 
         headers: { cookie: `rs_session=${cookie}` },
       });
       assert.equal(res.status, 200);
-      assert.doesNotMatch(await res.text(), /\$45\.00/);
+      // The manager clears the gate at any amount -> the confirm flow (here the add-method
+      // state, which shows the price), never the neutral page.
+      assert.match(await res.text(), /\$45\.00/);
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test('GET /s/:token: an authorized user over their limit sees the "request approval" affordance (SDD §10)', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
+    const userId = await insertUser(db, 'sub-over-limit-user');
+    await db.insert(siteRoles).values({
+      siteId,
+      userId,
+      role: 'authorized_user',
+      status: 'authorized',
+      maxAuthorizationCents: 1000,
+    });
+    const { cookie } = sessionAndCsrf(userId);
+
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/s/${rawToken}`, {
+        headers: { cookie: `rs_session=${cookie}` },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.text();
+      assert.match(body, /\$45\.00/);
+      assert.match(body, /above your authorization limit/i);
+      assert.match(body, /Request manager approval/i);
     });
   } finally {
     await client.close();

@@ -7,7 +7,7 @@
  * `authorizeAction` so the deny-by-default matrix (§7) is the single gate.
  * All queries are parameterized through Drizzle; nothing is built from raw SQL.
  */
-import { and, eq, isNull, ne } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import type { AppDatabase } from '../db/client.js';
 import {
   bathrooms,
@@ -107,22 +107,31 @@ export async function issueQrToken(
   return { rawToken, tokenId: row.id };
 }
 
+/** Outcome of an invite: `created` distinguishes a fresh invite from an idempotent
+ * "already a member" no-op, so the console can show a distinct message (SDD §11.1, §11.4).
+ * Defined here (the base service module) so `manager/service.ts` can share it without a
+ * circular import. */
+export interface InviteOutcome {
+  created: boolean;
+  role: SiteRoleRow;
+}
+
 /**
  * Invites the initial Site Manager by phone, creating a pending `role=manager`
- * SiteRole with a null `user_id`; the invite bridge (§3.3) links it to an
- * identity when the invitee first authenticates. Confers no authority until
- * then. Throws when the Site does not exist.
+ * SiteRole with a null `user_id` (and `null` limit -- a manager is unlimited,
+ * SDD §7); the invite bridge (§3.3) links + activates it when the invitee first
+ * authenticates. Confers no authority until then. Throws when the Site does not
+ * exist.
  *
- * Idempotent like `inviteSiteMember` (SDD §11.1, §11.4): a repeat invite for
- * the same not-yet-linked phone at this Site returns the existing pending
- * record instead of inserting a duplicate row, so the §3.3 bridge never faces
- * two pending invites for the same phone+site+role from this path.
+ * Idempotent and reported as such (SDD §11.1, §11.4): if any **non-revoked**
+ * SiteRole (pending *or* accepted) already exists for this phone at the site, no
+ * row is inserted and the existing role is returned with `created: false`.
  */
 export async function inviteInitialManager(
   db: AppDatabase,
   siteId: string,
   invitedPhone: string,
-): Promise<SiteRoleRow> {
+): Promise<InviteOutcome> {
   const [site] = await db.select({ id: sites.id }).from(sites).where(eq(sites.id, siteId)).limit(1);
   if (!site) {
     throw new SiteNotFoundError();
@@ -135,34 +144,39 @@ export async function inviteInitialManager(
       and(
         eq(siteRoles.siteId, siteId),
         eq(siteRoles.invitedPhone, invitedPhone),
-        eq(siteRoles.role, 'manager'),
-        isNull(siteRoles.userId),
         ne(siteRoles.status, 'revoked'),
       ),
     )
     .limit(1);
   if (existing) {
-    return existing;
+    return { created: false, role: existing };
   }
 
   const [row] = await db
     .insert(siteRoles)
-    .values({ siteId, invitedPhone, role: 'manager', status: 'pending' })
+    .values({
+      siteId,
+      invitedPhone,
+      role: 'manager',
+      status: 'pending',
+      maxAuthorizationCents: null,
+    })
     .returning();
   if (!row) {
     throw new Error('Failed to create manager invite');
   }
-  return row;
+  return { created: true, role: row };
 }
 
 export interface SiteWithBathrooms {
   site: SiteRow;
   bathrooms: BathroomRow[];
-  /** SiteRoles at this site not yet linked to an identity, newest first. */
-  pendingInvites: SiteRoleRow[];
+  /** Non-revoked `role=manager` SiteRoles at this site (pending + accepted), oldest first --
+   * the Company-Admin console's per-site manager list, with revoke (SDD §11.1, §11.3). */
+  managers: SiteRoleRow[];
 }
 
-/** Lists every Site with its Bathrooms and pending invites for the Company-Admin console. */
+/** Lists every Site with its Bathrooms and managers for the Company-Admin console. */
 export async function listSitesWithBathrooms(db: AppDatabase): Promise<SiteWithBathrooms[]> {
   const siteRows = await db.select().from(sites).orderBy(sites.createdAt);
   const result: SiteWithBathrooms[] = [];
@@ -172,14 +186,47 @@ export async function listSitesWithBathrooms(db: AppDatabase): Promise<SiteWithB
       .from(bathrooms)
       .where(eq(bathrooms.siteId, site.id))
       .orderBy(bathrooms.createdAt);
-    const pendingInvites = await db
+    const managers = await db
       .select()
       .from(siteRoles)
-      .where(and(eq(siteRoles.siteId, site.id), eq(siteRoles.status, 'pending')))
+      .where(
+        and(
+          eq(siteRoles.siteId, site.id),
+          eq(siteRoles.role, 'manager'),
+          ne(siteRoles.status, 'revoked'),
+        ),
+      )
       .orderBy(siteRoles.createdAt);
-    result.push({ site, bathrooms: bathroomRows, pendingInvites });
+    result.push({ site, bathrooms: bathroomRows, managers });
   }
   return result;
+}
+
+/**
+ * Revokes a SiteRole at `siteId`, setting `status=revoked` (SDD §11.1, §7). Used by the
+ * Company Admin to revoke a Manager. The target's `site_id` is verified against `siteId`
+ * (the caller re-derives it here rather than trusting the client). A revoked role confers
+ * no authority and cannot be redeemed by the bridge again (§3.3). Throws when the role does
+ * not exist at the site.
+ */
+export async function revokeSiteRole(
+  db: AppDatabase,
+  siteId: string,
+  roleId: string,
+): Promise<SiteRoleRow> {
+  const [role] = await db.select().from(siteRoles).where(eq(siteRoles.id, roleId)).limit(1);
+  if (!role || role.siteId !== siteId) {
+    throw new SiteRoleNotFoundError();
+  }
+  const [row] = await db
+    .update(siteRoles)
+    .set({ status: 'revoked' })
+    .where(eq(siteRoles.id, roleId))
+    .returning();
+  if (!row) {
+    throw new SiteRoleNotFoundError();
+  }
+  return row;
 }
 
 /** Raised when an onboarding action names a Site that does not exist. */
@@ -187,6 +234,15 @@ export class SiteNotFoundError extends Error {
   constructor() {
     super('Site not found');
     this.name = 'SiteNotFoundError';
+  }
+}
+
+/** Raised when a role-management action names a SiteRole not found at the target site.
+ * Defined here (base module) so manager/service.ts can share it without a circular import. */
+export class SiteRoleNotFoundError extends Error {
+  constructor() {
+    super('Site role not found');
+    this.name = 'SiteRoleNotFoundError';
   }
 }
 

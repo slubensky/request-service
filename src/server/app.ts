@@ -36,7 +36,7 @@ function buildRouter(runtime: AuthRuntime): Router {
   // (SDD §9.3) -- not Stripe; see src/payments/gateway.ts.
   const paymentGateway = new MockPaymentGateway();
   registerAdminRoutes(router, runtime, paymentGateway);
-  registerManagerRoutes(router, runtime);
+  registerManagerRoutes(router, runtime, paymentGateway);
   registerPublicRoutes(router, runtime, undefined, paymentGateway);
   // Demo invite-code acceptance (SDD §6.3): registers nothing unless DEMO_MODE is on.
   registerDemoRoutes(router, runtime);

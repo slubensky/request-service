@@ -12,16 +12,26 @@ import { renderDemoInviteCode } from './demo-invite-code.js';
 import type { SiteWithBathrooms } from '../../admin/service.js';
 import type { SiteRoleRow } from '../../db/schema.js';
 
-function renderPendingInvite(invite: SiteRoleRow, demoCode: string | undefined): string {
-  const safePhone = escapeHtml(invite.invitedPhone ?? 'unknown number');
-  const safeRole = escapeHtml(invite.role);
-  // Demo-only (SDD §6.3): rendered only when a code is present for the invite
-  // (DEMO_MODE on); otherwise the invite renders exactly as before.
+function renderManagerRow(
+  siteId: string,
+  manager: SiteRoleRow,
+  demoCode: string | undefined,
+): string {
+  const safePhone = escapeHtml(manager.invitedPhone ?? 'linked account');
+  const safeStatus = escapeHtml(manager.status);
+  // Demo-only (SDD §6.3): the accept code is shown only for a pending manager invite
+  // when a code is present (DEMO_MODE on); otherwise nothing extra renders.
   const demoHtml = demoCode ? renderDemoInviteCode(demoCode) : '';
+  const revokeAction = `/admin/sites/${encodeURIComponent(siteId)}/roles/${encodeURIComponent(
+    manager.id,
+  )}/revoke`;
   return `
-          <li class="invite">
-            <span class="invite-phone">${safePhone}</span>
-            <span class="invite-role">${safeRole}</span>${demoHtml}
+          <li class="manager">
+            <span class="manager-phone">${safePhone}</span>
+            <span class="manager-status">${safeStatus}</span>
+            <form class="inline-form" method="post" action="${escapeHtml(revokeAction)}" data-admin-form>
+              <button type="submit">Revoke</button>
+            </form>${demoHtml}
           </li>`;
 }
 
@@ -39,28 +49,20 @@ function renderBathroom(siteId: string, bathroomId: string, label: string): stri
           </li>`;
 }
 
-// Demo-only (SDD §6.3): the pending-invites list itself is new admin-console
-// surface introduced for the demo click-through and is gated on DEMO_MODE as a
-// whole, not just the code/link within it -- with DEMO_MODE off the admin
-// console must render byte-for-byte as it did before this feature existed.
-function renderPendingInvites(
-  entry: SiteWithBathrooms,
-  demoCodes: ReadonlyMap<string, string>,
-): string {
-  const invitesHtml =
-    entry.pendingInvites.length === 0
-      ? '<li class="empty">No pending invites.</li>'
-      : entry.pendingInvites
-          .map((invite) => renderPendingInvite(invite, demoCodes.get(invite.id)))
+// The managers list gives the Company Admin visibility of who manages each site,
+// with a Revoke control (SDD §11.1, §11.3). Rendered in every environment; the
+// per-manager demo accept code within it is still DEMO_MODE-only.
+function renderManagers(entry: SiteWithBathrooms, demoCodes: ReadonlyMap<string, string>): string {
+  const managersHtml =
+    entry.managers.length === 0
+      ? '<li class="empty">No managers yet.</li>'
+      : entry.managers
+          .map((manager) => renderManagerRow(entry.site.id, manager, demoCodes.get(manager.id)))
           .join('');
-  return `\n        <ul class="invites">${invitesHtml}</ul>`;
+  return `\n        <h4>Managers</h4>\n        <ul class="managers">${managersHtml}</ul>`;
 }
 
-function renderSite(
-  entry: SiteWithBathrooms,
-  demoMode: boolean,
-  demoCodes: ReadonlyMap<string, string>,
-): string {
+function renderSite(entry: SiteWithBathrooms, demoCodes: ReadonlyMap<string, string>): string {
   const { site } = entry;
   const safeName = escapeHtml(site.name);
   const safeAddress = escapeHtml(site.address);
@@ -68,14 +70,14 @@ function renderSite(
     entry.bathrooms.length === 0
       ? '<li class="empty">No bathrooms yet.</li>'
       : entry.bathrooms.map((b) => renderBathroom(site.id, b.id, b.label)).join('');
-  const invitesSection = demoMode ? renderPendingInvites(entry, demoCodes) : '';
+  const managersSection = renderManagers(entry, demoCodes);
   const bathroomAction = `/admin/sites/${encodeURIComponent(site.id)}/bathrooms`;
   const managerAction = `/admin/sites/${encodeURIComponent(site.id)}/managers`;
   return `
       <section class="card site">
         <h3>${safeName}</h3>
         <p class="subtitle">${safeAddress}</p>
-        <ul class="bathrooms">${bathroomsHtml}</ul>${invitesSection}
+        <ul class="bathrooms">${bathroomsHtml}</ul>${managersSection}
         <form class="stack-form" method="post" action="${escapeHtml(bathroomAction)}" data-admin-form>
           <label>Bathroom label
             <input name="label" required maxlength="120" autocomplete="off" />
@@ -93,21 +95,20 @@ function renderSite(
 
 /**
  * Renders the console: a create-site form plus each site with its onboarding
- * actions. `demoMode` gates the entire pending-invites section (SDD §6.3): when
- * false the console renders byte-for-byte as it did before this feature
- * existed. `demoCodes` maps a pending invite's SiteRole id to its single-use
- * accept code, and is only consulted when `demoMode` is true.
+ * actions and its managers list (with Revoke). `demoCodes` maps a pending
+ * manager invite's SiteRole id to its single-use accept code (SDD §6.3) and is
+ * empty unless DEMO_MODE is on -- the managers list itself renders in every
+ * environment.
  */
 export function renderAdminConsole(
   sites: SiteWithBathrooms[],
   csrfToken: string,
-  demoMode = false,
   demoCodes: ReadonlyMap<string, string> = new Map(),
 ): string {
   const sitesHtml =
     sites.length === 0
       ? '<p class="muted-note">No sites yet. Create one to begin onboarding.</p>'
-      : sites.map((entry) => renderSite(entry, demoMode, demoCodes)).join('');
+      : sites.map((entry) => renderSite(entry, demoCodes)).join('');
   const bodyHtml = `
       <header class="page-header">
         <h1>Company Admin</h1>

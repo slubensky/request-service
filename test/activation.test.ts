@@ -6,8 +6,9 @@
  * against a real PGlite database, and assert authority through the deny-by-
  * default capability matrix (`authorizeAction`), never a bespoke check. They
  * cover: verified-identifier match activates a manager; a non-matching token
- * leaves the invite pending with no authority; an assistant invite links but
- * stays pending (no self-elevation); and repeat authentication is idempotent.
+ * leaves the invite pending with no authority; an authorized_user invite is
+ * activated to `authorized` on accept (one-step, no promotion); and repeat
+ * authentication is idempotent.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -90,29 +91,38 @@ test('a non-matching verified phone leaves the invite pending and confers no aut
   }
 });
 
-test('a matching assistant invite is linked but stays pending -- no self-elevation to authority', async () => {
+test('a matching authorized_user invite is activated to authorized on accept (one step, no promotion)', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const siteId = await seedSite(db);
-    await inviteSiteMember(db, siteId, 'assistant', INVITED_PHONE);
+    await inviteSiteMember(db, siteId, 'authorized_user', INVITED_PHONE, 5000);
 
-    const user = await findOrCreateUserByCognitoSub(db, 'sub-assistant', INVITED_PHONE);
+    const user = await findOrCreateUserByCognitoSub(db, 'sub-authorized-user', INVITED_PHONE);
     const bridged = await bridgePendingSiteRoles(db, user.id, INVITED_PHONE);
     assert.equal(bridged.length, 1);
-    assert.equal(bridged[0]?.role, 'assistant');
-    // Linked to the identity, but authority is withheld until a manager promotes.
+    assert.equal(bridged[0]?.role, 'authorized_user');
+    // Linked AND activated in the same step -- the authorized user can now request service.
     assert.equal(bridged[0]?.userId, user.id);
-    assert.equal(bridged[0]?.status, 'pending');
+    assert.equal(bridged[0]?.status, 'authorized');
 
-    // The matrix still denies a paid request for a pending assistant.
+    // The matrix now allows a paid request within their limit (4500 <= 5000).
     const decision = await authorizeAction(db, user.id, {
       type: 'create_cleaning_request',
       siteId,
       bathroomId: 'b0000000-0000-0000-0000-000000000000',
       amountCents: 4500,
     });
-    assert.equal(decision.allowed, false);
-    assert.equal(decision.allowed === false && decision.reason, 'requires_authorized_status');
+    assert.equal(decision.allowed, true);
+
+    // ...but an amount above their limit is routed to a manager's approval (not self-authorized).
+    const overLimit = await authorizeAction(db, user.id, {
+      type: 'create_cleaning_request',
+      siteId,
+      bathroomId: 'b0000000-0000-0000-0000-000000000000',
+      amountCents: 9000,
+    });
+    assert.equal(overLimit.allowed, false);
+    assert.equal(overLimit.allowed === false && overLimit.reason, 'exceeds_max_authorization');
   } finally {
     await client.close();
   }
