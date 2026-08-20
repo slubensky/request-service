@@ -18,12 +18,12 @@
 
 ## Baseline (before any manual walkthrough)
 
-| Check | Result |
-| --- | --- |
-| `npm test` | 163/163 pass |
+| Check                   | Result                                                               |
+| ----------------------- | -------------------------------------------------------------------- |
+| `npm test`              | 163/163 pass                                                         |
 | `npm run test:coverage` | 77.83% lines / 83.17% branches / 81.97% functions (floors: 73/83/77) |
-| `npm run lint` | clean (eslint + prettier) |
-| `npm run build` | clean, 45 source files built |
+| `npm run lint`          | clean (eslint + prettier)                                            |
+| `npm run build`         | clean, 45 source files built                                         |
 
 ## Walkthrough performed
 
