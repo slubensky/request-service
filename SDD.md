@@ -1,5 +1,13 @@
 # Software Design Document — QR Bathroom Cleaning Service Request App
 
+> **Last edited:** 2026-08-21 20:30 UTC — Bugfix (tooling): `drizzle/meta/_journal.json`'s
+> `0003_phase6_authorized_users` entry carried a `when` timestamp five days in the future
+> relative to `0004`'s real generation time, so drizzle-orm's runtime migrator (which gates
+> on timestamp comparison, not hash) silently skipped `0004` (#010's partial-index fix)
+> forever on any database that had already applied `0003` — reproducing #010's symptom
+> even after #010/#011 shipped. Corrected to a realistic value; an already-migrated
+> database additionally needs a one-time row repair (see changelog #012). No spec impact.
+
 > **Last edited:** 2026-08-21 19:15 UTC — Bugfix: `isUniqueViolation` (§3.3, §9.4) now
 > walks an error's `.cause` chain, not just its top-level object, so it correctly detects
 > a Postgres `23505` wrapped by this drizzle-orm version's `DrizzleQueryError` — closing a
@@ -719,6 +727,32 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #012 — 2026-08-21T20:30:00-04:00
+
+**Bugfix (tooling, no spec/data-model impact)**: migration `0004` (#010's partial-index
+fix) never actually applied to any database that already had `0003` applied, no matter how
+many times `npm run db:migrate` ran — reproducing #010's exact symptom (revoke-then-
+reinvite silently fails to reactivate) even after #010/#011 shipped. Root cause:
+drizzle-orm's runtime migrator (`PgDialect.migrate`) does not track applied migrations by
+hash; it compares each migration's journal `when` timestamp against the single
+most-recently-applied `created_at` recorded in `drizzle.__drizzle_migrations`, and only
+applies a migration whose `when` is strictly greater. `drizzle/meta/_journal.json`'s entry
+for `0003_phase6_authorized_users` (hand-authored alongside #010's predecessor work) carried
+`"when": 1787775000000` — 2026-08-26T20:10:00Z, five days after `0004` was actually
+generated (`1787336624369` → 2026-08-21T18:23:44Z). Since `0004`'s real timestamp was
+smaller than the already-recorded high-water mark, the migrator silently treated it as
+already applied and skipped it on every run, on every database where `0003` had already
+been applied — with no error, matching exactly the confusing "fixed but still broken"
+reports.
+
+Fix: corrected `0003`'s journal `when` to `1787200000000` (restoring a realistic,
+non-future value between `0002`'s and `0004`'s real timestamps) so a fresh database applies
+all migrations in correct order. A database that already applied the poisoned `0003` entry
+must additionally have its stored `drizzle.__drizzle_migrations` row repaired directly (a
+one-time `UPDATE ... SET created_at = 1787200000000 WHERE created_at = 1787775000000`) —
+the journal fix alone cannot rewrite an already-recorded row — after which `0004` applies
+normally on the next `db:migrate` run.
 
 ### #011 — 2026-08-21T19:15:00-04:00
 

@@ -26,7 +26,7 @@
     {
       "idx": 3,
       "version": "7",
-      "when": 1787775000000,
+      "when": 1787200000000,
       "tag": "0003_phase6_authorized_users",
       "breakpoints": true
     },
