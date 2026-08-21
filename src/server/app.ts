@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Router } from './router.js';
@@ -113,7 +115,20 @@ export function createApp(): (req: IncomingMessage, res: ServerResponse) => void
   return createAppForRuntime(getAuthRuntime());
 }
 
-/** Optionally accepts a runtime override so tests can exercise the real HTTP path against PGlite. */
-export function createHttpServer(runtime?: AuthRuntime): Server {
-  return createServer(runtime ? createAppForRuntime(runtime) : createApp());
+/**
+ * Optionally accepts a runtime override so tests can exercise the real HTTP path against
+ * PGlite. Serves over HTTPS when `TLS_CERT_FILE`/`TLS_KEY_FILE` are both set, otherwise plain
+ * HTTP -- unchanged, which is what tests (neither var set) and production (TLS terminated at
+ * the reverse proxy, per SDD §13) use. `src/index.ts` requires these locally: cookies are
+ * unconditionally `Secure` (SDD §12), which a browser without a "localhost is a secure
+ * context" exception silently drops over plain HTTP (SDD changelog #014).
+ */
+export function createHttpServer(runtime?: AuthRuntime): Server | HttpsServer {
+  const handler = runtime ? createAppForRuntime(runtime) : createApp();
+  const certFile = process.env.TLS_CERT_FILE;
+  const keyFile = process.env.TLS_KEY_FILE;
+  if (certFile && keyFile) {
+    return createHttpsServer({ cert: readFileSync(certFile), key: readFileSync(keyFile) }, handler);
+  }
+  return createServer(handler);
 }

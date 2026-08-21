@@ -714,6 +714,7 @@ deny-by-default matrix (§7); nothing here is a new role.
 | No card-shaped mock UI         | The only payment-method UI action is "Add a payment method (mock)" (§9.4); no free-text PAN/CVV/expiry field exists anywhere, even fake, to avoid a pattern that invites real card collection later.                                                                    |
 | Step-up on reuse               | Reusing a saved (mock) payment method to place a new hold requires the session to have authenticated within the last 5 minutes (§6.4, §9.4); the server independently re-checks this on every `POST /s/:token/authorize`, not just in the UI.                           |
 | No concurrent duplicate holds  | At most one non-terminal `CleaningRequest` may exist per bathroom at a time, enforced by a read-check plus a partial unique index (§9.4); a race is a clean `409`, never an unhandled `500`.                                                                            |
+| Cookies always Secure          | Every cookie (session, OAuth state, demo double-submit CSRF) is marked `Secure` unconditionally, with no environment-based exception (§13, changelog #014). Local development therefore runs over real HTTPS via a locally-trusted cert (mkcert), not plain `http://localhost` — see README "Local development". |
 
 ## 13. Confirmed stack decisions
 
@@ -738,6 +739,32 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #014 — 2026-08-21T22:40:00-04:00
+
+**Bugfix (dev environment, no production behavior impact)**: reported as "Invalid or missing
+form token" when accepting a manager invite link copied into a different browser. Root cause:
+every cookie the app sets (session, OAuth state, the demo invite's double-submit CSRF token)
+is marked `Secure` unconditionally (`src/auth/cookies.ts`) -- correct for production, but local
+dev has always run over plain `http://localhost:3000` (README, `.env.example`), and a `Secure`
+cookie set over plain HTTP is silently dropped by any browser without a "localhost is a secure
+context" exception (Safari; Firefox on a non-`localhost` hostname; a phone hitting a LAN IP,
+per `.env.example`'s own `PUBLIC_BASE_URL` note). The already-correct per-request nonce-scoped
+CSRF cookie from #013(b) never had a chance to be sent in those browsers, so its token
+comparison failed with no matching cookie at all -- not a defect in the nonce-scoping fix
+itself. Considered and rejected: relaxing `Secure` conditionally on the connection (e.g.
+trusting `x-forwarded-proto`) touches cookie/CSRF logic across every auth surface for an
+environment-only problem. Fix instead: `src/index.ts` now refuses to start over plain HTTP in
+local development (`NODE_ENV` unset) unless `TLS_CERT_FILE`/`TLS_KEY_FILE` are both set;
+`createHttpServer` (`src/server/app.ts`) serves HTTPS with them via `node:https`, otherwise
+plain HTTP unchanged (tests, and production, which terminates TLS at the reverse proxy per
+§13, are unaffected). README documents one-time cert generation via mkcert;
+`.env.example`/`COGNITO_REDIRECT_URI`/`PUBLIC_BASE_URL` updated to `https://localhost:3000`.
+Cookie logic itself is unchanged -- see §12's new "Cookies always Secure" invariant. Tests:
+`test/tls-server.test.ts` (HTTP vs. HTTPS branching, including a real TLS handshake against a
+throwaway fixture cert) and `test/dev-tls-required.test.ts` (the dev entry point's fail-closed
+behavior, and that it's skipped under `NODE_ENV=production`). Full gate clean (`npm test` 198
+pass, `test:coverage`, `lint`, `build`).
 
 ### #013 — 2026-08-21T21:45:00-04:00
 

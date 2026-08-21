@@ -44,10 +44,10 @@ try {
 
   /* eslint-disable no-console -- this script's entire output is the deliverable (SDD-external dev tooling). */
   console.log(`Company Admin ready: users.id=${user.id} (cognito_sub=${cognitoSub})\n`);
-  console.log('Open http://localhost:3000/admin, open devtools -> Console, and run:\n');
+  console.log('Open https://localhost:3000/admin, open devtools -> Console, and run:\n');
   console.log(`  document.cookie = "rs_session=${token}; path=/";\n`);
   console.log('...then reload the page. Or, from the command line:\n');
-  console.log(`  curl -H 'Cookie: rs_session=${token}' http://localhost:3000/admin\n`);
+  console.log(`  curl -H 'Cookie: rs_session=${token}' https://localhost:3000/admin\n`);
   /* eslint-enable no-console */
 } finally {
   await pool.end();

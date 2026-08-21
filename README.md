@@ -39,15 +39,29 @@ Requires Node.js >= 20 and a local PostgreSQL instance.
    npm run db:migrate
    ```
 
-4. **Start the dev server** (hot-reloads on change):
+4. **Generate a local TLS cert.** Cookies are always `Secure` (SDD §12), and a browser
+   without a "localhost is a secure context" exception (anything but Chromium) silently
+   drops them over plain HTTP -- so the dev server requires real HTTPS. One-time setup with
+   [mkcert](https://github.com/FiloSottile/mkcert):
+
+   ```sh
+   brew install mkcert   # or your OS's package manager -- see the mkcert README
+   mkcert -install
+   mkcert localhost
+   ```
+
+   This writes `localhost.pem` and `localhost-key.pem`, which `.env.example`'s
+   `TLS_CERT_FILE`/`TLS_KEY_FILE` already point at.
+
+5. **Start the dev server** (hot-reloads on change):
 
    ```sh
    npm run dev
    ```
 
-   Visit `http://localhost:3000`.
+   Visit `https://localhost:3000`.
 
-5. **Bootstrap a Company Admin session.** Company Admin is never self-service
+6. **Bootstrap a Company Admin session.** Company Admin is never self-service
    (SDD §3) -- it's provisioned as an ops action against the database. For a
    laptop sandbox, do that with:
 
@@ -59,14 +73,14 @@ Requires Node.js >= 20 and a local PostgreSQL instance.
    snippet (and a `curl` example) to set the session cookie, so you can reach
    `/admin` without deploying a real Cognito user pool.
 
-6. **Walk the full flow without live SMS/Cognito.** With `DEMO_MODE=1` (the
+7. **Walk the full flow without live SMS/Cognito.** With `DEMO_MODE=1` (the
    `.env.example` default), inviting a manager or assistant from the Admin or
    Manager console surfaces a single-use accept code and link (SDD §6.3) that
    stands in for SMS-OTP verification -- click through it in a private/
    incognito window to activate that identity, no real phone or AWS involved.
    `DEMO_MODE` is off by default in production.
 
-7. **Run tests / lint / build:**
+8. **Run tests / lint / build:**
 
    ```sh
    npm test              # fast, no coverage
