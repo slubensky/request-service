@@ -39,7 +39,11 @@ export function renderAcceptForm({ csrfToken, code = '', error }: AcceptFormOpti
   return renderLayout({ title: 'Accept invitation', bodyHtml, scripts: [] });
 }
 
-/** Renders the outcome page after a valid code is redeemed (SDD §6.3 / §3.3). */
+/** Renders the outcome page after a valid code is redeemed (SDD §6.3 / §3.3). `activated`
+ * and `role` reflect the accepter's ACTUAL authority at the site after the bridge, so a
+ * superseded-duplicate accept reports real authority rather than a stale "pending". Both
+ * roles activate in one step (Phase 6) -- there is no promotion, so the copy never mentions
+ * one. */
 export function renderAcceptResult({
   activated,
   role,
@@ -47,11 +51,16 @@ export function renderAcceptResult({
   activated: boolean;
   role: InvitableRole;
 }): string {
-  const safeRole = escapeHtml(role);
-  const message = activated
-    ? `You are now an authorized <strong>${safeRole}</strong>. Your site is operable.`
-    : `Your <strong>${safeRole}</strong> invitation is linked, but still pending. ` +
-      'A manager must promote you before you can act.';
+  let message: string;
+  if (!activated) {
+    message =
+      'Your invitation was recorded, but you do not currently hold active authority at this site. Ask a manager to re-invite you.';
+  } else if (role === 'manager') {
+    message = 'You are now an authorized <strong>manager</strong>. Your site is operable.';
+  } else {
+    message =
+      'You are now an <strong>authorized user</strong>. You can request a cleaning — a request above your limit is sent to a manager for approval.';
+  }
   const bodyHtml = `
       <header class="page-header">
         <h1>Invitation accepted</h1>
