@@ -21,16 +21,36 @@ type SiteRoleTx = Parameters<Parameters<AppDatabase['transaction']>[0]>[0];
 // (site_id, user_id) is the constraint the bridge must never surface as a 500 (§3.3).
 const UNIQUE_VIOLATION = '23505';
 
-/** Postgres unique-violation detector, shared by every "conditional write + defensive
- * catch" idiom in this codebase (the §3.3 invite bridge below, and the duplicate-active-
- * request guard in src/payments/service.ts, SDD §9.4). */
-export function isUniqueViolation(error: unknown): boolean {
+function hasUniqueViolationCode(error: unknown): boolean {
   return (
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&
     (error as { code?: unknown }).code === UNIQUE_VIOLATION
   );
+}
+
+/** Postgres unique-violation detector, shared by every "conditional write + defensive
+ * catch" idiom in this codebase (the §3.3 invite bridge below, and the duplicate-active-
+ * request guard in src/payments/service.ts, SDD §9.4).
+ *
+ * The driver's raw error (with `.code`) is not necessarily the error object a caller
+ * catches: drizzle-orm wraps it in a `DrizzleQueryError` and attaches the original as
+ * `.cause`, so a check against only the top-level object misses every real unique
+ * violation and lets it propagate as an unhandled 500 -- exactly the failure mode this
+ * helper exists to prevent. Walk the `.cause` chain (bounded, in case of a cyclic or
+ * unexpectedly deep chain) so this works whether the caller sees the raw driver error,
+ * a wrapped one, or a future wrapper that follows the same `.cause` convention. */
+export function isUniqueViolation(error: unknown): boolean {
+  const MAX_DEPTH = 5;
+  let current = error;
+  for (let depth = 0; depth < MAX_DEPTH && current != null; depth += 1) {
+    if (hasUniqueViolationCode(current)) {
+      return true;
+    }
+    current = typeof current === 'object' && 'cause' in current ? current.cause : undefined;
+  }
+  return false;
 }
 
 /**
