@@ -1,5 +1,12 @@
 # Software Design Document — QR Bathroom Cleaning Service Request App
 
+> **Last edited:** 2026-08-21 19:15 UTC — Bugfix: `isUniqueViolation` (§3.3, §9.4) now
+> walks an error's `.cause` chain, not just its top-level object, so it correctly detects
+> a Postgres `23505` wrapped by this drizzle-orm version's `DrizzleQueryError` — closing a
+> gap where every "conditional write + defensive catch" site's documented "never surfaces
+> as an unhandled 500" guarantee was silently not holding. Changelog #011. Per AGENTS.md
+> spec policy, edit date/time recorded here.
+
 > **Last edited:** 2026-08-21 14:30 UTC — Bugfix: a revoked SiteRole no longer permanently
 > blocks the same identity from being re-invited and reactivated at the same site.
 > `site_roles_site_user_key` (§4) is now a partial unique index excluding revoked rows;
@@ -198,7 +205,12 @@ phone to one site). `bridgePendingSiteRoles` enforces this as follows:
   bridge call touching the same row is a no-op, not a conflict. As defense in depth
   against any remaining race, a Postgres unique-violation (`23505`) surfaced during
   activation is caught and treated as "another call already won this site" instead of
-  propagating as an unhandled error.
+  propagating as an unhandled error. `isUniqueViolation` (`src/db/access.ts`) detects this
+  by SQLSTATE, walking the error's `.cause` chain — not just the top-level object —
+  because the driver's raw error is not necessarily the object a caller catches (a
+  wrapping query-error type may attach the original as `.cause`); this is the sole
+  detector shared by every "conditional write + defensive catch" site in the codebase,
+  including the duplicate-active-request guard (§9.4).
 
 This is a resilience change only: the single-invite happy path (one pending invite per
 phone per site) is byte-for-byte unchanged in behavior — same row activated/linked, same
@@ -707,6 +719,25 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #011 — 2026-08-21T19:15:00-04:00
+
+**Bugfix**: `isUniqueViolation` (§3.3, the shared detector behind every "conditional write
+
+- defensive catch" idiom, including the duplicate-active-request guard §9.4) stopped
+  detecting real Postgres unique violations, silently breaking the "never surfaces as an
+  unhandled 500" guarantee at every one of its three call sites. Confirmed against a real
+  Postgres 16 instance (not PGlite): reactivating a revoked manager (per #010's fix) hit a
+  genuine `23505` on `site_roles_site_user_key` — expected and meant to be caught as a
+  graceful no-op — but it propagated as an unhandled request error (HTTP 500) instead.
+  Root cause: this drizzle-orm version wraps the driver's raw error (carrying `.code`) in a
+  `DrizzleQueryError`, attaching the original as `.cause` rather than spreading its
+  properties onto the top-level object; the detector only ever inspected the top level, so
+  it always returned false against the actual wrapped shape every real call site receives.
+  Fix: `isUniqueViolation` now walks the `.cause` chain (depth-bounded, cycle-safe) so it
+  recognizes a `23505` regardless of how many wrapper layers sit between it and the caller.
+  No behavior change to any caller's contract — each site's documented "caught, not
+  unhandled" guarantee now actually holds, exactly as already specified.
 
 ### #010 — 2026-08-21T14:30:00-04:00
 
