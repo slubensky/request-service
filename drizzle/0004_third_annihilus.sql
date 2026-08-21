@@ -1,0 +1,2 @@
+DROP INDEX "site_roles_site_user_key";--> statement-breakpoint
+CREATE UNIQUE INDEX "site_roles_site_user_key" ON "site_roles" USING btree ("site_id","user_id") WHERE "site_roles"."status" <> 'revoked';

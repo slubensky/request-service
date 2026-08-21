@@ -11,7 +11,7 @@
  * builder; the raw code alphabet excludes visually ambiguous characters.
  */
 import { randomInt } from 'node:crypto';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { AppDatabase } from '../db/client.js';
 import { demoInviteCodes, siteRoles, type DemoInviteCodeRow } from '../db/schema.js';
 import { bridgePendingSiteRoles, findOrCreateUserByCognitoSub } from '../db/access.js';
@@ -162,11 +162,15 @@ export async function acceptDemoInviteCode(
   // redeemed row's own status. When a duplicate invite is superseded (SDD §3.3), the
   // redeemed row is left `revoked` even though the resolved user already holds an
   // `authorized` role at the site; keying the outcome off the resolved role (there is at
-  // most one per user per site) avoids a misleading "still pending" result page.
+  // most one ACTIVE role per user per site, Phase 8) avoids a misleading "still pending"
+  // or "no authority" result page. A revoked-then-reactivated identity can have both a
+  // historical revoked row and a current one for (site, user); prefer the non-revoked row
+  // exactly like `resolveSiteRole` does, so a just-reactivated role is reported correctly.
   const [current] = await db
     .select({ role: siteRoles.role, status: siteRoles.status })
     .from(siteRoles)
     .where(and(eq(siteRoles.userId, user.id), eq(siteRoles.siteId, role.siteId)))
+    .orderBy(sql`(${siteRoles.status} = 'revoked')`)
     .limit(1);
 
   return {

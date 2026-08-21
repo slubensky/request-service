@@ -7,7 +7,7 @@
  * are parameterized through Drizzle and scoped by the authenticated user id and
  * the target site id -- never by a client-supplied role claim.
  */
-import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { PlatformRole, Principal, ResolvedSiteRole } from '../auth/authorize.js';
 import type { AppDatabase } from './client.js';
 import { siteRoles, users, type SiteRoleRow, type UserRow } from './schema.js';
@@ -37,6 +37,15 @@ export function isUniqueViolation(error: unknown): boolean {
  * Resolves the authenticated user's authority at a site, or null when they
  * hold no role there (a customer -- deny by default). The query is scoped to
  * both the user id (from the verified session) and the site id.
+ *
+ * A revoked-then-reactivated identity can have TWO rows for `(site_id, user_id)`
+ * (Phase 8: the unique index is partial, excluding revoked rows) -- a historical
+ * `revoked` one and, once re-invited and re-accepted, a current non-revoked one.
+ * The `ORDER BY` prefers the non-revoked row, so an active role is always
+ * resolved over stale revoked history; the index guarantees at most one
+ * non-revoked row exists, so this is deterministic. If only revoked history
+ * exists, that row is still returned (preserving the specific `role_revoked`
+ * deny reason over a blanket "no role at all").
  */
 export async function resolveSiteRole(
   db: AppDatabase,
@@ -53,6 +62,7 @@ export async function resolveSiteRole(
     })
     .from(siteRoles)
     .where(and(eq(siteRoles.userId, userId), eq(siteRoles.siteId, siteId)))
+    .orderBy(sql`(${siteRoles.status} = 'revoked')`, asc(siteRoles.id))
     .limit(1);
 
   const row = rows[0];
@@ -230,14 +240,23 @@ async function bridgeSiteGroup(
   }
 
   return db.transaction(async (tx) => {
-    // Guard: the user may already hold a role at this site (granted directly,
-    // or linked by an earlier bridge call). Superseding leftover pending
-    // duplicates is always safe; writing a second role for the same user at
-    // the site is not -- no-op gracefully instead of colliding.
+    // Guard: the user may already hold an ACTIVE role at this site (granted directly,
+    // or linked by an earlier bridge call). Superseding leftover pending duplicates is
+    // always safe; writing a second active role for the same user at the site is not --
+    // no-op gracefully instead of colliding. A REVOKED role does not count here (Phase 8
+    // fix): the unique index is partial and excludes revoked rows, so a revoked identity
+    // must be allowed to be re-invited and reactivated at the same site rather than being
+    // permanently blocked by its own revoked history.
     const [existingRole] = await tx
       .select({ id: siteRoles.id })
       .from(siteRoles)
-      .where(and(eq(siteRoles.siteId, siteId), eq(siteRoles.userId, userId)))
+      .where(
+        and(
+          eq(siteRoles.siteId, siteId),
+          eq(siteRoles.userId, userId),
+          ne(siteRoles.status, 'revoked'),
+        ),
+      )
       .limit(1);
     if (existingRole) {
       await supersedeDuplicates(

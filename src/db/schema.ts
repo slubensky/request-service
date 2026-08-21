@@ -125,7 +125,15 @@ export const siteRoles = pgTable(
     bathroomScope: jsonb('bathroom_scope').$type<string[]>(),
     createdAt: createdAt(),
   },
-  (table) => [uniqueIndex('site_roles_site_user_key').on(table.siteId, table.userId)],
+  (table) => [
+    // Partial: excludes revoked rows (Phase 8 fix) so a revoked role does not permanently
+    // occupy the (site, user) slot -- a revoked identity can be re-invited and reactivated
+    // at the same site, with the revoked row kept as history. Enforces the real invariant:
+    // at most one ACTIVE role per user per site, not "at most one role ever".
+    uniqueIndex('site_roles_site_user_key')
+      .on(table.siteId, table.userId)
+      .where(sql`${table.status} <> 'revoked'`),
+  ],
 );
 
 export const cleaningRequests = pgTable(
