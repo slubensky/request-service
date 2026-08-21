@@ -171,12 +171,13 @@ export async function inviteInitialManager(
 export interface SiteWithBathrooms {
   site: SiteRow;
   bathrooms: BathroomRow[];
-  /** Non-revoked `role=manager` SiteRoles at this site (pending + accepted), oldest first --
-   * the Company-Admin console's per-site manager list, with revoke (SDD §11.1, §11.3). */
-  managers: SiteRoleRow[];
+  /** Every non-revoked SiteRole at this site (managers + authorized users, pending or
+   * accepted), oldest first -- the Company-Admin console's per-site membership list, with
+   * revoke (both roles) and set-limit (authorized users) controls (SDD §11.1, §11.3). */
+  members: SiteRoleRow[];
 }
 
-/** Lists every Site with its Bathrooms and managers for the Company-Admin console. */
+/** Lists every Site with its Bathrooms and members for the Company-Admin console. */
 export async function listSitesWithBathrooms(db: AppDatabase): Promise<SiteWithBathrooms[]> {
   const siteRows = await db.select().from(sites).orderBy(sites.createdAt);
   const result: SiteWithBathrooms[] = [];
@@ -186,18 +187,12 @@ export async function listSitesWithBathrooms(db: AppDatabase): Promise<SiteWithB
       .from(bathrooms)
       .where(eq(bathrooms.siteId, site.id))
       .orderBy(bathrooms.createdAt);
-    const managers = await db
+    const members = await db
       .select()
       .from(siteRoles)
-      .where(
-        and(
-          eq(siteRoles.siteId, site.id),
-          eq(siteRoles.role, 'manager'),
-          ne(siteRoles.status, 'revoked'),
-        ),
-      )
+      .where(and(eq(siteRoles.siteId, site.id), ne(siteRoles.status, 'revoked')))
       .orderBy(siteRoles.createdAt);
-    result.push({ site, bathrooms: bathroomRows, managers });
+    result.push({ site, bathrooms: bathroomRows, members });
   }
   return result;
 }

@@ -1,5 +1,13 @@
 # Software Design Document — QR Bathroom Cleaning Service Request App
 
+> **Last edited:** 2026-08-21 13:00 UTC — Phase 7: `site_role:set_limit` added to the
+> `company_admin` platform matrix so a Company Admin can **change an authorized user's
+> approval limit** (and revoke authorized users, revoke already being role-agnostic); new
+> admin route `POST /admin/sites/:siteId/roles/:roleId/limit` (§11.3) and the admin console
+> now lists managers **and** authorized users with limits (§11.1). Updated §7, §11.1, §11.3;
+> changelog #009. The web-app restyle and the demo accept Continue-link tweak are
+> presentation-only. Per AGENTS.md spec policy, edit date/time recorded here.
+
 > **Last edited:** 2026-08-20 15:30 UTC — Phase 6: renamed the site role `assistant` →
 > **`authorized_user`** everywhere and reshaped site authority into two tiers — a `manager`
 > has no authorization limit and self-authorizes any amount, while an `authorized_user` has
@@ -330,8 +338,9 @@ already use — no live Cognito, no real clock dependency.
 ## 7. Authorization
 
 - **Deny-by-default, capability matrix.** Every state-changing endpoint is gated by an explicit capability matrix keyed by `(platform_role, SiteRole.role, SiteRole.status)`, scoped to the target Site (and `bathroom_scope` where applicable). A request is denied unless the matrix names an explicit allow for its endpoint given the caller's platform role and, where relevant, their SiteRole at the target Site.
-- **Platform-level-only capabilities.** Creating or editing a Site or Bathroom, issuing the initial QRToken, setting/managing the fixed price (price versions), capturing/canceling a PaymentAuthorization, and **revoking a SiteRole (`site_role:revoke`)** gate on `platform_role=company_admin` — a Company Admin revokes a Manager. (`site_role:revoke` is the one capability held on _both_ axes: cross-site for a Company Admin, and — historically — at-site for a Manager; in this phase only the Company Admin uses it, since a Manager instead _deletes_ an authorized user, below.) No `SiteRole` satisfies the other platform-only checks, including `role=manager`.
-- **Site-scoped capabilities.** Creating a CleaningRequest, authorizing a hold, saving a site's (mock) payment method, inviting a SiteRole (`site_role:invite`), setting an authorized user's limit (`site_role:set_limit`), deleting an authorized user (`site_role:delete`), replacing a QRToken at a site, and approving an over-limit request (`request:approve`) require an explicit, active `SiteRole` check scoped to the relevant Site. `cleaning_request:create` and `payment_method:save` (§9.4) are granted to `manager` and `authorized_user`; `site_role:invite`, `site_role:set_limit`, `site_role:delete`, and `request:approve` are granted to `manager` only. None is held by `company_admin` on the platform axis: a Company Admin does not request cleanings, seed a site's payment method, or manage a site's day-to-day membership.
+- **Platform-level-only capabilities.** Creating or editing a Site or Bathroom, issuing the initial QRToken, setting/managing the fixed price (price versions), and capturing/canceling a PaymentAuthorization gate on `platform_role=company_admin`; no `SiteRole` (including `role=manager`) satisfies these.
+- **Cross-cutting SiteRole-management capabilities (both axes).** `site_role:revoke` and `site_role:set_limit` are held by `company_admin` on the platform axis (cross-site) **and** by `manager` on the site axis (at their own site), the same way `qr_token:replace` sits on both axes. A Company Admin thus **revokes** a Manager or an authorized user, and **changes an authorized user's approval limit**, at any site; a Manager does the same for authorized users at their own site (a Manager also **deletes** an authorized user via `site_role:delete`, manager-only). `setAuthorizedUserLimit` rejects a non-`authorized_user` target on either axis.
+- **Site-scoped capabilities.** Creating a CleaningRequest, authorizing a hold, saving a site's (mock) payment method, inviting a SiteRole (`site_role:invite`), deleting an authorized user (`site_role:delete`), replacing a QRToken at a site, and approving an over-limit request (`request:approve`) require an explicit, active `SiteRole` check scoped to the relevant Site. `cleaning_request:create` and `payment_method:save` (§9.4) are granted to `manager` and `authorized_user`; `site_role:invite`, `site_role:delete`, and `request:approve` are granted to `manager` only. None of these is held by `company_admin` on the platform axis: a Company Admin does not request cleanings, seed a site's payment method, invite/delete members, or approve requests.
 - The server **never trusts** UI state, QR contents, or any client-submitted claim about role or authority. Every authorization decision is re-derived server-side from the current `platform_role` and `SiteRole` record at request time.
 - Authorization checks precede any business logic (price lookup, Stripe call, etc.) — a request with insufficient authority fails closed before any side effect occurs.
 - **`max_authorization_cents` bounds a paid request by role.** A `manager` has no limit (`null` = unlimited) and may authorize any amount directly. An `authorized_user` may self-authorize only up to their limit; a request **above** the limit is not denied outright but routed to a manager's approval (§10) — the hold is placed only once a manager grants it. A request is never authorized above the limit on the authorized user's own authority, regardless of what the client displayed.
@@ -480,7 +489,7 @@ A new Site enters the system only through a Company Admin, in this order:
 4. **Set the fixed price** (`fixed_price_cents`, establishing the first `price_version`; §8).
 5. **Invite the initial Manager** by identifier, creating a pending `role=manager` SiteRole (§3.3) — the invitee becomes an active Manager once they authenticate through Cognito and the bridge links their identity. Idempotent like the Site Manager invitation flow (§11.4): a repeat invite of the same not-yet-linked phone at the same Site returns the existing pending record rather than inserting a duplicate row, so the §3.3 bridge never faces two pending invites for the same phone+site+role from this path.
 
-Only a Company Admin can perform steps 1–4; no Site, Bathroom, QRToken, or price can exist without one. Step 5 is the last Company Admin action required before the Site is operable — all subsequent day-to-day requesting, hold authorization, and member management (inviting authorized users, adjusting their limits, deleting them) happen under the Manager's own SiteRole. A Company Admin may additionally **revoke a Manager** at any site (`site_role:revoke`; §7).
+Only a Company Admin can perform steps 1–4; no Site, Bathroom, QRToken, or price can exist without one. Step 5 is the last Company Admin action required before the Site is operable — subsequent day-to-day requesting and hold authorization happen under a Manager's SiteRole. The Company-Admin console lists, per site, both **managers and authorized users** (with each authorized user's approval limit); a Company Admin may **revoke** a Manager or an authorized user (`site_role:revoke`) and **change an authorized user's approval limit** (`site_role:set_limit`) at any site (§7), alongside the Manager's own membership management at their site (§11.4).
 
 ### 11.2 Public visitor flow
 
@@ -502,7 +511,8 @@ The Phase 0 vertical slice realizes the flows above with these routes; all autho
 - `POST /admin/sites/:siteId/bathrooms` — add a Bathroom to a Site (gated on `bathroom:create`).
 - `POST /admin/sites/:siteId/bathrooms/:bathroomId/qr` — issue a fresh opaque QRToken, revoking any prior active token for that Bathroom (gated on `qr_token:issue`). The raw token is rendered once into an inline SVG QR encoding the public scan URL; only its one-way hash is persisted (§5).
 - `POST /admin/sites/:siteId/managers` — invite the initial Site Manager by phone, creating a pending `role=manager` SiteRole (gated on `site_role:invite_initial_manager`; §3.3). Idempotent and reported as such (§11.4): re-inviting a phone that already holds a non-revoked SiteRole at the site inserts no row and signals "already a member".
-- `POST /admin/sites/:siteId/roles/:roleId/revoke` — (Phase 6) revoke a SiteRole (in practice a Manager) at `:siteId`, setting `status=revoked` (gated on `site_role:revoke`, held by `company_admin` on the platform axis; §7). The target's `site_id` is re-derived from `:roleId` server-side and checked against `:siteId` before the gate. A revoked role confers no authority and cannot be redeemed by the bridge again (§3.3).
+- `POST /admin/sites/:siteId/roles/:roleId/revoke` — revoke a SiteRole (a Manager **or** an authorized user) at `:siteId`, setting `status=revoked` (gated on `site_role:revoke`, held by `company_admin` on the platform axis; §7). The target's `site_id` is re-derived from `:roleId` server-side and checked against `:siteId` before the gate. A revoked role confers no authority and cannot be redeemed by the bridge again (§3.3).
+- `POST /admin/sites/:siteId/roles/:roleId/limit` — (Phase 7) change an authorized user's `max_authorization_cents` (gated on `site_role:set_limit`, held by `company_admin` on the platform axis; §7). Positive amount required; rejects a target that is not an `authorized_user` at `:siteId`. Mirrors the manager's own set-limit route (§11.4).
 - `GET /s/:token` — public scan resolution. Rate-limited hash lookup (§5), then a neutral "see staff" page (§11.2) **for any caller without authorized site authority at the resolved site**. For that population the response is byte-for-byte identical whether the token is active, revoked, or unknown, whether or not the Site has an activated manager, and whether or not the caller is authenticated — no oracle. It creates no PaymentIntent and writes no data. (An authorized Manager or authorized user at the resolved site instead sees the price-confirmation flow — §9.3, §11.6; that population is the sole, deliberate exception, per §11.2.)
 
 All onboarding `POST`s are state-changing and therefore require the existing session-bound CSRF token (§ CSRF guard); the Company Admin console submits them via a small progressive-enhancement ES module that echoes the token in the `x-csrf-token` header. The public scan page loads no such requirement and ships ~0 KB JS.
@@ -680,6 +690,22 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #009 — 2026-08-21T13:00:00-04:00
+
+Phase 7 — Company Admin can manage authorized users, plus a UI restyle (no spec
+impact for the latter). `site_role:set_limit` is added to the `company_admin`
+platform matrix, joining `site_role:revoke` as a capability held on **both** axes
+(platform for the admin cross-site, site for a manager at their own site). A
+Company Admin can now **revoke an authorized user** (revoke was already
+role-agnostic; only the console surface is new) and **change an authorized user's
+approval limit** via `POST /admin/sites/:siteId/roles/:roleId/limit` (§11.3),
+reusing `setAuthorizedUserLimit` (which still rejects a non-`authorized_user`
+target). The admin console lists managers and authorized users per site with
+limits (§11.1). No data-model or migration change. The web-app restyle
+(Restroom Hero look) and the demo accept-page Continue-link tweak (manager →
+`/manager`, authorized user → none) are presentation-only and carry no spec
+change beyond this note.
 
 ### #008 — 2026-08-20T15:30:00-04:00
 

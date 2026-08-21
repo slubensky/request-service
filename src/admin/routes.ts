@@ -38,6 +38,7 @@ import {
   type IssuedQrToken,
   type SiteWithBathrooms,
 } from './service.js';
+import { setAuthorizedUserLimit, RoleNotManageableError } from '../manager/service.js';
 import { renderAdminConsole, renderQrIssued } from '../render/templates/admin.js';
 import { renderPaymentsConsole } from '../render/templates/payments.js';
 import { renderQrSvg } from '../qr/image.js';
@@ -138,7 +139,7 @@ async function demoCodesForConsole(
     return new Map();
   }
   const pendingIds = siteList.flatMap((entry) =>
-    entry.managers.filter((manager) => manager.status === 'pending').map((manager) => manager.id),
+    entry.members.filter((member) => member.status === 'pending').map((member) => member.id),
   );
   return unusedCodesForSiteRoles(db, pendingIds);
 }
@@ -251,6 +252,38 @@ async function handleRevokeRole(runtime: AuthRuntime, ctx: RouteContext): Promis
   } catch (error) {
     if (error instanceof SiteRoleNotFoundError) {
       sendText(ctx.res, 404, 'Site role not found');
+      return;
+    }
+    throw error;
+  }
+  ctx.res.writeHead(204).end();
+}
+
+/** Company Admin change of an authorized user's approval limit at a site (SDD §11.1, §7). */
+async function handleSetRoleLimit(runtime: AuthRuntime, ctx: RouteContext): Promise<void> {
+  const siteId = ctx.params.siteId ?? '';
+  const roleId = ctx.params.roleId ?? '';
+  const gate = await authorizeOrReject(runtime, ctx, { type: 'set_site_role_limit', siteId });
+  if (!gate) return;
+  const fields = await readFormBody(ctx.req);
+  const raw = (fields.max_authorization_cents ?? '').trim();
+  if (!/^[0-9]{1,9}$/.test(raw) || Number.parseInt(raw, 10) <= 0) {
+    sendText(
+      ctx.res,
+      400,
+      'max_authorization_cents must be a whole number of cents greater than zero',
+    );
+    return;
+  }
+  try {
+    await setAuthorizedUserLimit(gate.db, siteId, roleId, Number.parseInt(raw, 10));
+  } catch (error) {
+    if (error instanceof SiteRoleNotFoundError) {
+      sendText(ctx.res, 404, 'Site role not found');
+      return;
+    }
+    if (error instanceof RoleNotManageableError) {
+      sendText(ctx.res, 409, error.message);
       return;
     }
     throw error;
@@ -376,6 +409,9 @@ export function registerAdminRoutes(
   );
   router.post('/admin/sites/:siteId/roles/:roleId/revoke', (ctx) =>
     withBodyLimit(handleRevokeRole)(runtime, ctx),
+  );
+  router.post('/admin/sites/:siteId/roles/:roleId/limit', (ctx) =>
+    withBodyLimit(handleSetRoleLimit)(runtime, ctx),
   );
   router.get('/admin/payments', (ctx) => handleListPayments(runtime, ctx));
   registerCaptureOrCancel(

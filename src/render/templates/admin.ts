@@ -9,6 +9,7 @@
 import { escapeHtml } from '../escape.js';
 import { renderLayout } from './layout.js';
 import { renderDemoInviteCode } from './demo-invite-code.js';
+import { formatCents } from './confirm.js';
 import type { SiteWithBathrooms } from '../../admin/service.js';
 import type { SiteRoleRow } from '../../db/schema.js';
 
@@ -30,7 +31,7 @@ function renderManagerRow(
             <span class="manager-phone">${safePhone}</span>
             <span class="manager-status">${safeStatus}</span>
             <form class="inline-form" method="post" action="${escapeHtml(revokeAction)}" data-admin-form>
-              <button type="submit">Revoke</button>
+              <button type="submit" class="button-danger">Revoke</button>
             </form>${demoHtml}
           </li>`;
 }
@@ -49,17 +50,59 @@ function renderBathroom(siteId: string, bathroomId: string, label: string): stri
           </li>`;
 }
 
-// The managers list gives the Company Admin visibility of who manages each site,
-// with a Revoke control (SDD §11.1, §11.3). Rendered in every environment; the
-// per-manager demo accept code within it is still DEMO_MODE-only.
-function renderManagers(entry: SiteWithBathrooms, demoCodes: ReadonlyMap<string, string>): string {
+/** Renders one authorized-user row: status, approval limit, a set-limit form, and Revoke.
+ * A pending invite also shows its demo accept code (DEMO_MODE only). */
+function renderAuthorizedUserRow(
+  siteId: string,
+  user: SiteRoleRow,
+  demoCode: string | undefined,
+): string {
+  const safePhone = escapeHtml(user.invitedPhone ?? 'linked account');
+  const safeStatus = escapeHtml(user.status);
+  const limitText =
+    user.maxAuthorizationCents === null ? 'none' : formatCents(user.maxAuthorizationCents);
+  const demoHtml = demoCode ? renderDemoInviteCode(demoCode) : '';
+  const base = `/admin/sites/${encodeURIComponent(siteId)}/roles/${encodeURIComponent(user.id)}`;
+  return `
+          <li class="authorized-user">
+            <span class="member-phone">${safePhone}</span>
+            <span class="member-status">${safeStatus}</span>
+            <span class="member-limit">Limit: ${escapeHtml(limitText)}</span>
+            <form class="inline-form" method="post" action="${escapeHtml(`${base}/limit`)}" data-admin-form>
+              <label>New limit (cents)
+                <input name="max_authorization_cents" required inputmode="numeric" maxlength="9" autocomplete="off" />
+              </label>
+              <button type="submit">Update limit</button>
+            </form>
+            <form class="inline-form" method="post" action="${escapeHtml(`${base}/revoke`)}" data-admin-form>
+              <button type="submit" class="button-danger">Revoke</button>
+            </form>${demoHtml}
+          </li>`;
+}
+
+// The membership lists give the Company Admin visibility of who manages and who is
+// authorized at each site, with Revoke (both) and set-limit (authorized users) controls
+// (SDD §11.1, §11.3). Rendered in every environment; the per-invite demo accept code is
+// still DEMO_MODE-only.
+function renderMembers(entry: SiteWithBathrooms, demoCodes: ReadonlyMap<string, string>): string {
+  const managers = entry.members.filter((m) => m.role === 'manager');
+  const authorizedUsers = entry.members.filter((m) => m.role === 'authorized_user');
   const managersHtml =
-    entry.managers.length === 0
+    managers.length === 0
       ? '<li class="empty">No managers yet.</li>'
-      : entry.managers
+      : managers
           .map((manager) => renderManagerRow(entry.site.id, manager, demoCodes.get(manager.id)))
           .join('');
-  return `\n        <h4>Managers</h4>\n        <ul class="managers">${managersHtml}</ul>`;
+  const usersHtml =
+    authorizedUsers.length === 0
+      ? '<li class="empty">No authorized users yet.</li>'
+      : authorizedUsers
+          .map((user) => renderAuthorizedUserRow(entry.site.id, user, demoCodes.get(user.id)))
+          .join('');
+  return (
+    `\n        <h4>Managers</h4>\n        <ul class="managers">${managersHtml}</ul>` +
+    `\n        <h4>Authorized users</h4>\n        <ul class="authorized-users">${usersHtml}</ul>`
+  );
 }
 
 function renderSite(entry: SiteWithBathrooms, demoCodes: ReadonlyMap<string, string>): string {
@@ -70,14 +113,14 @@ function renderSite(entry: SiteWithBathrooms, demoCodes: ReadonlyMap<string, str
     entry.bathrooms.length === 0
       ? '<li class="empty">No bathrooms yet.</li>'
       : entry.bathrooms.map((b) => renderBathroom(site.id, b.id, b.label)).join('');
-  const managersSection = renderManagers(entry, demoCodes);
+  const membersSection = renderMembers(entry, demoCodes);
   const bathroomAction = `/admin/sites/${encodeURIComponent(site.id)}/bathrooms`;
   const managerAction = `/admin/sites/${encodeURIComponent(site.id)}/managers`;
   return `
       <section class="card site">
         <h3>${safeName}</h3>
         <p class="subtitle">${safeAddress}</p>
-        <ul class="bathrooms">${bathroomsHtml}</ul>${managersSection}
+        <ul class="bathrooms">${bathroomsHtml}</ul>${membersSection}
         <form class="stack-form" method="post" action="${escapeHtml(bathroomAction)}" data-admin-form>
           <label>Bathroom label
             <input name="label" required maxlength="120" autocomplete="off" />
