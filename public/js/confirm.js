@@ -10,6 +10,21 @@ function csrfToken() {
   return meta ? meta.getAttribute('content') : '';
 }
 
+// Attaches the fetch-submit enhancement to every data-confirm-form under `root`.
+// Called once for the initial page, and again after each in-place DOM swap below --
+// swapping keeps this script's own execution context alive, so re-running this same
+// function is all a freshly-rendered form needs (no script re-execution required).
+function enhance(root) {
+  root.querySelectorAll('form[data-confirm-form]').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitForm(form).catch((error) => {
+        window.alert(`Request error: ${String(error)}`);
+      });
+    });
+  });
+}
+
 async function submitForm(form) {
   const body = new URLSearchParams(new FormData(form)).toString();
   const response = await fetch(form.action, {
@@ -35,18 +50,18 @@ async function submitForm(form) {
     return;
   }
 
-  // The result page is rendered in place, same as the admin console's QR-issued result.
+  // Swap the result page in as this document's own body -- NOT via document.write(),
+  // which does not reliably re-execute <script type="module"> in the newly-written
+  // document (a real browser-verified gap, not spec-guaranteed either way). That silently
+  // dropped this very enhancement on the page that follows, so the next submit (e.g.
+  // "Authorize hold" right after "Add a payment method") fell back to the form's native,
+  // un-enhanced POST and failed the server's CSRF gate. Parsing and swapping keeps this
+  // script's execution context alive, so re-running `enhance` on the new body is enough.
   const html = await response.text();
-  document.open();
-  document.write(html);
-  document.close();
+  const nextDoc = new DOMParser().parseFromString(html, 'text/html');
+  document.title = nextDoc.title;
+  document.body.replaceWith(nextDoc.body);
+  enhance(document.body);
 }
 
-document.querySelectorAll('form[data-confirm-form]').forEach((form) => {
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    submitForm(form).catch((error) => {
-      window.alert(`Request error: ${String(error)}`);
-    });
-  });
-});
+enhance(document);

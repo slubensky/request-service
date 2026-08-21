@@ -1,5 +1,16 @@
 # Software Design Document — QR Bathroom Cleaning Service Request App
 
+> **Last edited:** 2026-08-21 21:45 UTC — Two bugfixes (client-side, no spec impact):
+> (a) `public/js/confirm.js` rendered each successful mutation via `document.write()`,
+> which does not reliably re-execute `<script type="module">` in the new document — so the
+> very next form submit (e.g. "Authorize hold" right after "Add a payment method") fell back
+> to a native, un-enhanced POST and failed the CSRF gate as a bare 403 "Forbidden"; fixed by
+> swapping the DOM in place and re-running the same enhancement instead. (b) the demo
+> accept flow's double-submit CSRF cookie used one fixed name, so opening a second
+> `/invite/accept` link (a different invite, or the same one reloaded) in the same browser
+> silently invalidated an earlier one's cookie, failing that tab with "Invalid or missing
+> form token"; fixed by scoping the cookie name to a per-request nonce. Changelog #013.
+>
 > **Last edited:** 2026-08-21 20:30 UTC — Bugfix (tooling): `drizzle/meta/_journal.json`'s
 > `0003_phase6_authorized_users` entry carried a `when` timestamp five days in the future
 > relative to `0004`'s real generation time, so drizzle-orm's runtime migrator (which gates
@@ -727,6 +738,43 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #013 — 2026-08-21T21:45:00-04:00
+
+**Bugfix (client-side, no spec impact)**: two independent browser-only defects, both
+invisible to server-side/API-level tests by construction (each existing route's server-side
+authorization/CSRF logic was already covered and continued to pass unchanged; the defects
+were purely in what the browser executed).
+
+(a) A manager who scanned a QR with no saved payment method, clicked "Add a payment method
+(mock)", then immediately clicked "Authorize hold for $X" on the page that followed, got a
+bare 403 "Forbidden". Root cause: `public/js/confirm.js` rendered each successful mutation's
+next-state page via `document.open(); document.write(html); document.close();`.
+`document.write()` after the initial page load does not reliably re-execute
+`<script type="module">` in the newly-written document (confirmed directly: the network
+request for the second submit carried no `x-csrf-token` header and had navigation-style
+`accept`/`upgrade-insecure-requests` headers, proving the browser fell back to the form's
+native submission because `confirm.js`'s listener was never re-attached). The global CSRF
+gate then correctly, but unhelpfully, rejected the un-enhanced POST. Fix: parse the response
+HTML with `DOMParser`, replace `document.body` in place, and re-run the same attachment
+function against the new body -- keeping the script's execution context alive instead of
+relying on a fresh document to re-execute it. Verified end-to-end against a real Postgres +
+dev server + headless browser: "Add a payment method" immediately followed by "Authorize
+hold" now reaches "Hold placed" with no reload needed.
+
+(b) Copying a demo invite's "Accept link" and opening it in a different browser (or simply
+opening a second invite link in the same one) failed acceptance with "Invalid or missing
+form token". Root cause: `src/demo/routes.ts`'s pre-session double-submit CSRF protection
+used one fixed cookie name (`rs_demo_csrf`) for every `GET /invite/accept` response,
+regardless of invite. Loading a second accept link overwrote the first one's cookie in that
+browser; submitting the first (older) page afterward sent its now-stale hidden token against
+the second page's cookie value, which no longer matched. Confirmed by reproduction: two
+invite links opened in the same browser context, then submitting the first. Fix: the cookie
+name is now scoped by a random nonce minted alongside the token at `GET` time and echoed
+back in a second hidden field (`demo_csrf_nonce`); the server looks up the cookie by the
+_submitted_ nonce rather than one fixed name, so concurrently open accept pages no longer
+collide. The security property is unchanged -- the token itself, not the (public, exactly
+like the invite code) nonce, is what's checked.
 
 ### #012 — 2026-08-21T20:30:00-04:00
 
