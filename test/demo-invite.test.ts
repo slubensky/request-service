@@ -36,6 +36,7 @@ import {
   unusedCodesForSiteRoles,
 } from '../src/demo/service.js';
 import { renderManagerConsole } from '../src/render/templates/manager.js';
+import { renderAcceptResult } from '../src/render/templates/demo-invite.js';
 import { authorizeAction } from '../src/auth/enforce.js';
 import { createSite, inviteInitialManager } from '../src/admin/service.js';
 import { inviteSiteMember, type ManagedSite } from '../src/manager/service.js';
@@ -259,6 +260,73 @@ test('an authorized_user code links the identity and activates it in one step', 
       amountCents: 4500,
     });
     assert.equal(decision.allowed, true);
+  } finally {
+    await client.close();
+  }
+});
+
+test('renderAcceptResult reflects real authority and never mentions promotion', () => {
+  const managerHtml = renderAcceptResult({ activated: true, role: 'manager' });
+  assert.match(managerHtml, /authorized <strong>manager<\/strong>/);
+  assert.match(managerHtml, /site is operable/i);
+
+  const userHtml = renderAcceptResult({ activated: true, role: 'authorized_user' });
+  assert.match(userHtml, /<strong>authorized user<\/strong>/);
+  assert.match(userHtml, /request a cleaning/i);
+  assert.match(userHtml, /manager for approval/i);
+
+  const inactiveHtml = renderAcceptResult({ activated: false, role: 'authorized_user' });
+  assert.match(inactiveHtml, /do not currently hold active authority/i);
+
+  // The removed Phase-6 concept must not resurface in any state.
+  for (const html of [managerHtml, userHtml, inactiveHtml]) {
+    assert.doesNotMatch(html, /promote/i);
+    assert.doesNotMatch(html, /still pending/i);
+  }
+});
+
+test('a superseded-duplicate accept reports the resolved authority, not the redeemed row (no false "pending")', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const siteId = await seedSite(db);
+    // Two pending manager invites for the same phone (a pre-idempotency duplicate). The
+    // earliest is the bridge winner; the later one is what we redeem, and it gets superseded.
+    const [winner] = await db
+      .insert(siteRoles)
+      .values({
+        siteId,
+        invitedPhone: PHONE,
+        role: 'manager',
+        status: 'pending',
+        createdAt: new Date(Date.now() - 60_000),
+      })
+      .returning();
+    const [redeemed] = await db
+      .insert(siteRoles)
+      .values({
+        siteId,
+        invitedPhone: PHONE,
+        role: 'manager',
+        status: 'pending',
+        createdAt: new Date(),
+      })
+      .returning();
+    assert.ok(winner && redeemed);
+    const { code } = await issueDemoInviteCode(db, redeemed.id);
+
+    const outcome = await acceptDemoInviteCode(db, code);
+    assert.ok(outcome);
+    // The redeemed row itself is superseded to revoked...
+    const [redeemedRow] = await db
+      .select()
+      .from(siteRoles)
+      .where(eq(siteRoles.id, redeemed.id))
+      .limit(1);
+    assert.equal(redeemedRow?.status, 'revoked');
+    // ...but the outcome reflects the accepter's REAL authority: an authorized manager
+    // (the old code keyed off the revoked redeemed row and wrongly reported "still pending").
+    assert.equal(outcome.activated, true);
+    assert.equal(outcome.role, 'manager');
   } finally {
     await client.close();
   }

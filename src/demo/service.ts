@@ -158,18 +158,22 @@ export async function acceptDemoInviteCode(
   // invites activate to `authorized` on accept (SDD §3.3, Phase 6).
   await bridgePendingSiteRoles(db, user.id, invitedPhone);
 
-  // Reflect the actual post-bridge state rather than assuming it.
-  const [updated] = await db
-    .select({ status: siteRoles.status })
+  // Report the identity's ACTUAL authority at this site after the bridge -- not the
+  // redeemed row's own status. When a duplicate invite is superseded (SDD §3.3), the
+  // redeemed row is left `revoked` even though the resolved user already holds an
+  // `authorized` role at the site; keying the outcome off the resolved role (there is at
+  // most one per user per site) avoids a misleading "still pending" result page.
+  const [current] = await db
+    .select({ role: siteRoles.role, status: siteRoles.status })
     .from(siteRoles)
-    .where(eq(siteRoles.id, claimed.siteRoleId))
+    .where(and(eq(siteRoles.userId, user.id), eq(siteRoles.siteId, role.siteId)))
     .limit(1);
 
   return {
     userId: user.id,
     sub,
-    role: role.role,
-    activated: updated?.status === 'authorized',
+    role: current?.role ?? role.role,
+    activated: current?.status === 'authorized',
     siteId: role.siteId,
   };
 }
