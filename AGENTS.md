@@ -11,6 +11,7 @@ This repository is maintained with a spec-first, test-first, security-conscious 
 - Prefer the simplest architecture that satisfies the current spec.
 - Never mass edit more than 3 files without showing me the plan first.
 - If a task takes more than 5 steps, create a plan document first.
+- For any complex task (more than 3 files, or more than 5 steps), presenting the plan is not enough: stop and wait for my explicit approval before executing it. Do not implement, edit, or run anything beyond investigation until I approve.
 
 ## Architecture
 - Keep architecture minimal and easy to understand.
