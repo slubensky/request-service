@@ -1,5 +1,14 @@
 # Software Design Document — QR Bathroom Cleaning Service Request App
 
+> **Last edited:** 2026-08-21 14:30 UTC — Bugfix: a revoked SiteRole no longer permanently
+> blocks the same identity from being re-invited and reactivated at the same site.
+> `site_roles_site_user_key` (§4) is now a partial unique index excluding revoked rows;
+> the invite bridge's existing-role guard (§3.3) excludes revoked rows; `resolveSiteRole`
+> (§7) and the demo accept-result read now deterministically prefer a non-revoked row when
+> both a historical revoked row and a reactivated row exist for the same
+> `(site_id, user_id)`. Updated §3.3, §4; changelog #010. Per AGENTS.md spec policy, edit
+> date/time recorded here.
+
 > **Last edited:** 2026-08-21 13:00 UTC — Phase 7: `site_role:set_limit` added to the
 > `company_admin` platform matrix so a Company Admin can **change an authorized user's
 > approval limit** (and revoke authorized users, revoke already being role-agnostic); new
@@ -155,27 +164,35 @@ The same bridge bootstraps the very first Manager for a new Site: a **Company Ad
 
 A token whose verified identifier matches no pending invite links nothing and grants nothing — deny-by-default (§7) is unchanged, and Company Admin (`platform_role`) authority is orthogonal and untouched. The operation is **idempotent**: repeat authentication re-matches only still-unlinked pending invites, so an already-activated role (manager or authorized user) is left exactly as it was. All authority continues to be re-derived from the SiteRole matrix (§7) on every request — activation grants authority only because the resolved role is now `authorized`, never through any parallel code path.
 
-**Resilient bridge contract (added 2026-08-16, PR-D).** The unique index
-`site_roles_site_user_key` on `(site_id, user_id)` permits at most one SiteRole per user
-per site, so the bridge must never attempt to write the same `user_id` onto more than one
-row at a given site in a single pass — even when duplicate pending invites exist for the
-same phone (e.g. a manager re-invites a phone, or two managers independently invite the
-same phone to one site). `bridgePendingSiteRoles` enforces this as follows:
+**Resilient bridge contract (added 2026-08-16, PR-D; revoked-row exclusion added
+Phase 8).** The unique index `site_roles_site_user_key` on `(site_id, user_id)` permits
+at most one **active** (non-revoked) SiteRole per user per site — it is a **partial**
+index excluding `status=revoked` rows, so a revoked role and a later reactivated role for
+the same user+site can coexist as separate rows, the revoked one kept only as history.
+The bridge must never attempt to write the same `user_id` onto more than one _active_ row
+at a given site in a single pass — even when duplicate pending invites exist for the same
+phone (e.g. a manager re-invites a phone, or two managers independently invite the same
+phone to one site). `bridgePendingSiteRoles` enforces this as follows:
 
-- **At most one role per (user, site).** Matching pending invites for the verified phone
-  are grouped by `site_id` before any write; each site yields at most one
-  activated/linked row per bridge call.
+- **At most one active role per (user, site).** Matching pending invites for the verified
+  phone are grouped by `site_id` before any write; each site yields at most one
+  activated/linked row per bridge call. A **revoked** role at that site does not count as
+  an existing role for this purpose — see the reactivation guard below.
 - **Deterministic pick, graceful supersession.** When more than one pending invite
   matches the same phone at a site, the earliest-created match (`created_at` ascending,
   `id` ascending on tie) is the one activated/linked per steps 1–2 above; every other
   matching row at that site is marked `status=revoked` (superseded) rather than left
   dangling `pending` or written with a colliding `user_id`. A superseded duplicate confers
   no authority and can never be redeemed again.
-- **Already-has-a-role no-ops.** If the resolved user already holds a SiteRole (any
-  status) at a site that also has matching pending invites, the bridge leaves that
-  existing role untouched and only supersedes the pending duplicates — no insert, no
-  update collision, no error. The caller sees zero newly-bridged rows for that site and
-  can render a friendly "already a member" outcome instead of surfacing a failure.
+- **Already-has-an-ACTIVE-role no-ops; a revoked role does not block reactivation
+  (Phase 8 fix).** If the resolved user already holds a **non-revoked** SiteRole at a
+  site that also has matching pending invites, the bridge leaves that existing role
+  untouched and only supersedes the pending duplicates — no insert, no update collision,
+  no error. A **revoked** role at that site is deliberately excluded from this guard: it
+  must not permanently block the same identity from being re-invited and reactivated at
+  that site. (`site_roles_site_user_key`, §4, is a partial unique index excluding revoked
+  rows for exactly this reason — a revoked row and a later reactivated row for the same
+  `(site_id, user_id)` coexist, the revoked one kept only as history.)
 - **No unhandled 500 on a race.** The activating write is a single conditional
   `UPDATE ... WHERE id = ? AND user_id IS NULL AND status = 'pending'`, so a concurrent
   bridge call touching the same row is a no-op, not a conflict. As defense in depth
@@ -191,18 +208,18 @@ returned shape, same idempotency on repeat authentication.
 
 All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Payment fields are references only — the system never stores raw card data. Identity is anchored to a Cognito subject, never to a password.
 
-| Entity                   | Key fields                                                                             | Notes                                                                                                                                                                                                                                                                                                      |
-| ------------------------ | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Site**                 | `name`, `address`, `timezone`, `currency`, `fixed_price_cents`, `terms`                | One billing configuration; owns Bathrooms.                                                                                                                                                                                                                                                                 |
-| **Bathroom**             | `site_id`, `label`, `status`                                                           | Belongs to exactly one Site; at most one active QRToken.                                                                                                                                                                                                                                                   |
-| **QRToken**              | `bathroom_id`, `token_hash`, `status`                                                  | Stores a one-way hash of the token only; opaque and non-authorizing; replaceable/revocable.                                                                                                                                                                                                                |
-| **User**                 | `cognito_sub`, `phone`, `status`, `platform_role`                                      | Identity anchored to a Cognito subject; no passwords stored. `platform_role` ∈ {member, company_admin}, default `member`.                                                                                                                                                                                  |
-| **SiteRole**             | `user_id`, `site_id`, `role`, `status`, `max_authorization_cents`, `bathroom_scope`    | Manager-created site authority; deny by default; distinguishes an authorized user from a customer. `role` ∈ {manager, authorized_user}; `status` ∈ {pending, authorized, revoked}. `max_authorization_cents` is `null` (unlimited) for a manager and a manager-set positive amount for an authorized user. |
-| **CleaningRequest**      | `bathroom_id`, `price_version`, `amount_cents`, `status`                               | Exactly one payment authorization per request in the MVP.                                                                                                                                                                                                                                                  |
-| **PaymentAuthorization** | `request_id`, `stripe_payment_intent_id`, `status`                                     | Manual-capture; created fresh per request; never reused.                                                                                                                                                                                                                                                   |
-| **RequestApproval**      | `site_id`, `bathroom_id`, `price_version`, `amount`, `requester_user_id`, `expires_at` | An authorized user's **over-limit** request awaiting a manager's approval. Single-use; 15-minute expiry; bound values invalidate the approval on change (§10).                                                                                                                                             |
-| **PublicAlert**          | `bathroom_id`, `note`, `created_at`                                                    | Non-billable; no associated PaymentIntent or CleaningRequest.                                                                                                                                                                                                                                              |
-| **SitePaymentMethod**    | `site_id`, `gateway_token`, `display_label`, `created_by_user_id`                      | **Mock only** (§9.4); one per Site (unique on `site_id`) — belongs to the Site, not the User who added it. `display_label` is a fixed mock string, never a real-looking free-text PAN.                                                                                                                     |
+| Entity                   | Key fields                                                                             | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Site**                 | `name`, `address`, `timezone`, `currency`, `fixed_price_cents`, `terms`                | One billing configuration; owns Bathrooms.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **Bathroom**             | `site_id`, `label`, `status`                                                           | Belongs to exactly one Site; at most one active QRToken.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **QRToken**              | `bathroom_id`, `token_hash`, `status`                                                  | Stores a one-way hash of the token only; opaque and non-authorizing; replaceable/revocable.                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **User**                 | `cognito_sub`, `phone`, `status`, `platform_role`                                      | Identity anchored to a Cognito subject; no passwords stored. `platform_role` ∈ {member, company_admin}, default `member`.                                                                                                                                                                                                                                                                                                                                                                                       |
+| **SiteRole**             | `user_id`, `site_id`, `role`, `status`, `max_authorization_cents`, `bathroom_scope`    | Manager-created site authority; deny by default; distinguishes an authorized user from a customer. `role` ∈ {manager, authorized_user}; `status` ∈ {pending, authorized, revoked}. `max_authorization_cents` is `null` (unlimited) for a manager and a manager-set positive amount for an authorized user. Unique on `(site_id, user_id)` **among non-revoked rows only** (Phase 8) — a revoked role is kept as history and does not block the same identity being re-invited and reactivated at the same site. |
+| **CleaningRequest**      | `bathroom_id`, `price_version`, `amount_cents`, `status`                               | Exactly one payment authorization per request in the MVP.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **PaymentAuthorization** | `request_id`, `stripe_payment_intent_id`, `status`                                     | Manual-capture; created fresh per request; never reused.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **RequestApproval**      | `site_id`, `bathroom_id`, `price_version`, `amount`, `requester_user_id`, `expires_at` | An authorized user's **over-limit** request awaiting a manager's approval. Single-use; 15-minute expiry; bound values invalidate the approval on change (§10).                                                                                                                                                                                                                                                                                                                                                  |
+| **PublicAlert**          | `bathroom_id`, `note`, `created_at`                                                    | Non-billable; no associated PaymentIntent or CleaningRequest.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **SitePaymentMethod**    | `site_id`, `gateway_token`, `display_label`, `created_by_user_id`                      | **Mock only** (§9.4); one per Site (unique on `site_id`) — belongs to the Site, not the User who added it. `display_label` is a fixed mock string, never a real-looking free-text PAN.                                                                                                                                                                                                                                                                                                                          |
 
 ### 4.1 Referential notes
 
@@ -690,6 +707,31 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #010 — 2026-08-21T14:30:00-04:00
+
+**Bugfix**: a revoked SiteRole permanently blocked the same identity from ever being
+re-invited and reactivated at the same site — the invite bridge (§3.3) treated a revoked
+row identically to an active one when guarding against writing a second role for a user
+at a site, and the (site_id, user_id) unique index was not partial, so a revoked row
+occupied that slot forever. Confirmed by reproduction, not a data artifact — a Company
+Admin invites a manager, the manager accepts and is activated, the admin revokes them,
+the admin re-invites the same phone (a genuinely fresh pending row, since invite
+idempotency already excludes revoked rows), and acceptance silently failed: the fresh
+invite was superseded to `revoked` and the accepter was left with no authority, with the
+demo UI's own suggested remedy ("ask a manager to re-invite you") being exactly the
+non-working action. Root-caused to Phase 6/7 making revoke a real, exercised feature for
+the first time; latent since Phase 1.
+
+Fix: `site_roles_site_user_key` (§4) is now a **partial** unique index excluding
+`status=revoked` rows, so a historical revoked row and a later reactivated row for the
+same `(site_id, user_id)` can coexist. `bridgePendingSiteRoles`'s existing-role guard
+(§3.3) now excludes revoked rows, so a revoked-only identity is treated as having no role
+at the site and can be reactivated normally. `resolveSiteRole` (§7's production
+authorization read, used by every request) and the demo accept-result's post-bridge
+authority read now deterministically prefer a non-revoked row when both exist, so an
+active role is never shadowed by stale revoked history — and a still-revoked identity
+still resolves its `role_revoked` deny reason rather than a blanket denial.
 
 ### #009 — 2026-08-21T13:00:00-04:00
 

@@ -17,17 +17,26 @@
  *      admin invite paths, so the bridge does not need to defend against
  *      duplicates freshly created through this codebase's own invite flows;
  *  (d) regression: the ordinary single-invite accept + login-bridge path is
- *      byte-for-byte unchanged (one row bridged, same shape as before).
+ *      byte-for-byte unchanged (one row bridged, same shape as before);
+ *  (e)/(f) Phase 8 fix: a revoked role must NOT permanently block the same
+ *      identity from being re-invited and reactivated at the same site --
+ *      the (site_id, user_id) unique index is now partial (excludes revoked
+ *      rows) and the bridge's existing-role guard ignores revoked rows.
  *
  * All exercised against a real PGlite Postgres instance, so the unique
  * constraint is genuinely enforced -- these tests fail loudly if the fix
- * regresses to the old blanket-UPDATE shape.
+ * regresses to the old blanket-UPDATE shape, or if the revoke-reactivation
+ * fix regresses to permanently blocking re-invitation.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { eq } from 'drizzle-orm';
 import { authorizeAction } from '../src/auth/enforce.js';
-import { bridgePendingSiteRoles, findOrCreateUserByCognitoSub } from '../src/db/access.js';
+import {
+  bridgePendingSiteRoles,
+  findOrCreateUserByCognitoSub,
+  resolveSiteRole,
+} from '../src/db/access.js';
 import { createSite, inviteInitialManager } from '../src/admin/service.js';
 import { inviteSiteMember } from '../src/manager/service.js';
 import { acceptDemoInviteCode, issueDemoInviteCode } from '../src/demo/service.js';
@@ -283,6 +292,91 @@ test('concurrent bridge calls for the same duplicate-invite site never throw and
     assert.equal(authorizedForUser.length, 1, 'exactly one role is authorized for this user+site');
     const revoked = rows.filter((r) => r.status === 'revoked');
     assert.equal(revoked.length, 1);
+  } finally {
+    await client.close();
+  }
+});
+
+test('(e) Phase 8 fix: a revoked role does not block re-invitation and reactivation at the same site', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const siteId = await seedSite(db);
+
+    // First cycle: invite, accept, activate.
+    const firstInvite = (await inviteInitialManager(db, siteId, PHONE)).role;
+    const user = await findOrCreateUserByCognitoSub(db, 'sub-revoke-reinvite', PHONE);
+    const firstBridge = await bridgePendingSiteRoles(db, user.id, PHONE);
+    assert.equal(firstBridge.length, 1);
+    assert.equal(firstBridge[0]?.status, 'authorized');
+    assert.equal(
+      (await authorizeAction(db, user.id, { type: 'invite_site_role', siteId })).allowed,
+      true,
+    );
+
+    // Revoke it (Company Admin action).
+    await db.update(siteRoles).set({ status: 'revoked' }).where(eq(siteRoles.id, firstInvite.id));
+    assert.equal(
+      (await authorizeAction(db, user.id, { type: 'invite_site_role', siteId })).allowed,
+      false,
+    );
+    const revokedResolved = await resolveSiteRole(db, user.id, siteId);
+    assert.equal(
+      revokedResolved?.status,
+      'revoked',
+      'the deny reason stays role_revoked, not no_site_role',
+    );
+
+    // Re-invite the same phone at the same site: a genuinely fresh pending row (invite
+    // idempotency already treats a revoked phone as available).
+    const secondInvite = (await inviteInitialManager(db, siteId, PHONE)).role;
+    assert.notEqual(secondInvite.id, firstInvite.id);
+    assert.equal(secondInvite.status, 'pending');
+
+    // Accept again: this must now ACTIVATE, not get silently superseded.
+    const secondBridge = await bridgePendingSiteRoles(db, user.id, PHONE);
+    assert.equal(secondBridge.length, 1, 'the fresh invite is bridged, not silently dropped');
+    assert.equal(secondBridge[0]?.id, secondInvite.id);
+    assert.equal(secondBridge[0]?.status, 'authorized');
+
+    // Authority is restored.
+    assert.equal(
+      (await authorizeAction(db, user.id, { type: 'invite_site_role', siteId })).allowed,
+      true,
+    );
+    // resolveSiteRole prefers the reactivated row over the historical revoked one.
+    const reactivatedResolved = await resolveSiteRole(db, user.id, siteId);
+    assert.equal(reactivatedResolved?.status, 'authorized');
+
+    // Both rows coexist: one revoked (history), one authorized (current).
+    const rows = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+    assert.equal(rows.filter((r) => r.userId === user.id).length, 2);
+    assert.equal(rows.filter((r) => r.userId === user.id && r.status === 'revoked').length, 1);
+    assert.equal(rows.filter((r) => r.userId === user.id && r.status === 'authorized').length, 1);
+  } finally {
+    await client.close();
+  }
+});
+
+test('(f) Phase 8 fix: re-invite-and-accept after revoke reports real activation, not a false "no authority" outcome', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const siteId = await seedSite(db);
+
+    const firstInvite = (await inviteInitialManager(db, siteId, PHONE)).role;
+    const firstCode = await issueDemoInviteCode(db, firstInvite.id);
+    const firstOutcome = await acceptDemoInviteCode(db, firstCode.code);
+    assert.ok(firstOutcome);
+    assert.equal(firstOutcome.activated, true);
+
+    await db.update(siteRoles).set({ status: 'revoked' }).where(eq(siteRoles.id, firstInvite.id));
+
+    const secondInvite = (await inviteInitialManager(db, siteId, PHONE)).role;
+    const secondCode = await issueDemoInviteCode(db, secondInvite.id);
+    const secondOutcome = await acceptDemoInviteCode(db, secondCode.code);
+    assert.ok(secondOutcome, 'the fresh code is redeemed');
+    // Before the fix this was falsely `false` (the "ask a manager to re-invite you" bug).
+    assert.equal(secondOutcome.activated, true);
+    assert.equal(secondOutcome.role, 'manager');
   } finally {
     await client.close();
   }

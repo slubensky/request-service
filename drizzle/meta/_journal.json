@@ -29,6 +29,13 @@
       "when": 1787775000000,
       "tag": "0003_phase6_authorized_users",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787336624369,
+      "tag": "0004_third_annihilus",
+      "breakpoints": true
     }
   ]
 }
