@@ -46,6 +46,9 @@ export function renderLayout({ title, bodyHtml, scripts, csrfToken }: LayoutOpti
     <link rel="stylesheet" href="/css/base.css" />
   </head>
   <body>
+    <header class="app-bar">
+      <div class="brand">Restroom <span>Hero</span></div>
+    </header>
     <main id="app">
       ${bodyHtml}
     </main>${scriptTags}

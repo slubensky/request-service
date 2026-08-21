@@ -1,19 +1,28 @@
 /*
- * Base design tokens and mobile-first layout primitives.
- * No CSS framework -- hand-authored, small enough to audit in one read.
- * Mobile styles are the default; wider layouts are added via min-width
- * media queries only (mobile-first).
+ * Restroom Hero design system -- hand-authored, no framework, no bundler.
+ * A clean mobile-first look: a neutral-gray page behind white rounded cards,
+ * small gray section labels, bold near-black headings, black pill buttons, a
+ * teal brand accent, and rounded inputs. Mobile styles are the default; wider
+ * layouts are added via min-width media queries only. Light and dark themes are
+ * both defined via tokens.
  */
 
 :root {
-  /* Color tokens */
-  --color-bg: #ffffff;
-  --color-fg: #14151a;
-  --color-muted: #5b5f6b;
-  --color-primary: #1a56db;
+  /* Brand + status accents */
+  --rh-teal: #12b2c4;
+  --rh-green: #2fbf71;
+  --rh-red: #e5484d;
+
+  /* Light theme (default) */
+  --color-bg: #ececee;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f4f6;
+  --color-fg: #1a1b1e;
+  --color-muted: #8a8d95;
+  --color-border: #e6e7ea;
+  --color-primary: #1c1c1e;
   --color-primary-contrast: #ffffff;
-  --color-border: #e2e4e9;
-  --color-surface: #f7f8fa;
+  --color-accent: var(--rh-teal);
 
   /* Spacing scale */
   --space-1: 0.25rem;
@@ -23,26 +32,33 @@
   --space-5: 2rem;
 
   /* Typography */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  --font-size-sm: 0.8125rem;
   --font-size-base: 1rem;
   --font-size-lg: 1.25rem;
   --font-size-xl: 1.75rem;
   --line-height-base: 1.5;
 
-  /* Shape */
-  --radius-sm: 6px;
-  --radius-md: 10px;
+  /* Shape + elevation */
+  --radius-input: 12px;
+  --radius-card: 16px;
+  --radius-pill: 999px;
+  --shadow-card: 0 1px 2px rgba(16, 17, 20, 0.06), 0 8px 24px rgba(16, 17, 20, 0.05);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-bg: #14151a;
-    --color-fg: #f2f3f5;
-    --color-muted: #9a9ea8;
-    --color-primary: #6f9bf7;
-    --color-primary-contrast: #0b1220;
-    --color-border: #2a2c34;
-    --color-surface: #1c1e26;
+    --color-bg: #121316;
+    --color-surface: #1e1f25;
+    --color-surface-2: #262832;
+    --color-fg: #f3f4f6;
+    --color-muted: #9aa0ab;
+    --color-border: #2c2e36;
+    --color-primary: #f3f4f6;
+    --color-primary-contrast: #16171b;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
   }
 }
 
@@ -61,21 +77,50 @@ body {
   font-family: var(--font-sans);
   font-size: var(--font-size-base);
   line-height: var(--line-height-base);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Brand app bar (shared layout shell) */
+.app-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.brand {
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-fg);
+}
+
+.brand span {
+  color: var(--color-accent);
 }
 
 #app {
   max-width: 32rem;
   margin: 0 auto;
-  padding: var(--space-4) var(--space-3);
+  padding: var(--space-4) var(--space-3) var(--space-5);
 }
 
 .page-header {
-  margin-bottom: var(--space-4);
+  margin: var(--space-2) 0 var(--space-4);
+  text-align: center;
 }
 
 .page-header h1 {
   font-size: var(--font-size-xl);
+  font-weight: 800;
   margin: 0 0 var(--space-1);
+  letter-spacing: -0.01em;
 }
 
 .subtitle {
@@ -83,11 +128,13 @@ body {
   margin: 0;
 }
 
+/* Cards */
 .card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-3);
+  border-radius: var(--radius-card);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-card);
 }
 
 .card + .card,
@@ -95,15 +142,33 @@ body {
   margin-top: var(--space-3);
 }
 
+.card h2,
+.card h3 {
+  margin: 0 0 var(--space-1);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+/* Small gray section labels (rendered as h4 inside cards) */
+.card h4 {
+  font-size: var(--font-size-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-muted);
+  font-weight: 700;
+  margin: var(--space-4) 0 var(--space-2);
+}
+
 .muted-note {
   color: var(--color-muted);
   margin: var(--space-2) 0 0;
 }
 
+/* Forms */
 .stack-form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
   margin-top: var(--space-3);
 }
 
@@ -111,90 +176,207 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-muted);
 }
 
 .stack-form input,
 .stack-form select {
-  padding: var(--space-2);
+  padding: 0.75rem 0.85rem;
   font-size: var(--font-size-base);
   color: var(--color-fg);
-  background: var(--color-bg);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-input);
 }
 
+.stack-form input:focus,
+.stack-form select:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-color: var(--color-accent);
+}
+
+/* Buttons -- black pill primary, outline secondary, gray disabled */
 button,
 .button-link {
-  display: inline-block;
-  padding: var(--space-2) var(--space-3);
-  margin-top: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0.7rem 1.25rem;
+  margin-top: var(--space-2);
   font-size: var(--font-size-base);
   font-weight: 600;
   color: var(--color-primary-contrast);
   background: var(--color-primary);
-  border: none;
-  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
   text-decoration: none;
   cursor: pointer;
 }
 
-.bathrooms {
-  list-style: none;
-  padding: 0;
-  margin: var(--space-3) 0 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+.stack-form button,
+.stack-form .button-link {
+  width: 100%;
+  margin-top: var(--space-1);
 }
 
-.bathroom {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-
-.bathrooms .empty {
+button:disabled {
+  background: var(--color-border);
   color: var(--color-muted);
+  cursor: not-allowed;
 }
 
-.invites {
+.button-secondary {
+  background: var(--color-surface);
+  color: var(--color-fg);
+  border-color: var(--color-border);
+}
+
+.button-danger {
+  background: var(--color-surface);
+  color: var(--rh-red);
+  border-color: var(--color-border);
+}
+
+/* Membership + list rows rendered as rounded sub-cards */
+.bathrooms,
+.invites,
+.members,
+.managers,
+.authorized-users,
+.approvals {
   list-style: none;
   padding: 0;
-  margin: var(--space-3) 0 0;
+  margin: var(--space-2) 0 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
-.invite {
+.bathroom,
+.invite,
+.member,
+.manager,
+.authorized-user,
+.approval {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--space-2) var(--space-3);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  padding: 0.7rem 0.85rem;
 }
 
+.empty {
+  color: var(--color-muted);
+  background: transparent;
+  border: 0;
+  padding: var(--space-1) 0;
+}
+
+.bathroom-label,
+.member-phone,
+.manager-phone,
+.approval-bathroom {
+  font-weight: 600;
+}
+
+/* Status + role pills */
+.member-status,
+.manager-status,
 .invite-role {
-  color: var(--color-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  padding: 0.1rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
+  color: var(--color-fg);
   text-transform: capitalize;
 }
 
-.invites .empty {
+.member-limit,
+.approval-requester,
+.member-role,
+.approval-amount {
+  color: var(--color-muted);
+  font-size: var(--font-size-sm);
+}
+
+.approval-amount {
+  margin-left: auto;
+  font-weight: 700;
+  color: var(--color-fg);
+}
+
+/* Inline forms (revoke / delete / set-limit / issue-QR / approve) */
+.inline-form {
+  margin: 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.inline-form label {
+  font-size: var(--font-size-sm);
+  color: var(--color-muted);
+  gap: var(--space-1);
+  display: flex;
+  flex-direction: column;
+}
+
+.inline-form input {
+  padding: 0.45rem 0.6rem;
+  max-width: 8rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-fg);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+}
+
+.inline-form button,
+.bathroom button {
+  margin-top: 0;
+  min-height: 36px;
+  padding: 0.4rem 0.85rem;
+  font-size: var(--font-size-sm);
+}
+
+/* Demo invite code (DEMO_MODE only) */
+.invite-code {
+  font-size: var(--font-size-sm);
   color: var(--color-muted);
 }
 
-.inline-form {
-  margin: 0;
+.invite-code code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-base);
+  color: var(--color-fg);
+  background: var(--color-bg);
+  padding: 0.1rem 0.4rem;
+  border-radius: 6px;
 }
 
-.qr-card {
-  text-align: center;
+.invite-accept-link {
+  font-size: var(--font-size-sm);
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
+a {
+  color: var(--color-accent);
+}
+
+/* Price + QR */
 .price {
   font-size: var(--font-size-xl);
-  font-weight: 600;
+  font-weight: 800;
   margin: var(--space-2) 0;
 }
 
@@ -205,18 +387,30 @@ button,
 }
 
 .payment .inline-form {
-  display: inline-block;
+  display: inline-flex;
   margin-right: var(--space-2);
+}
+
+.qr-card {
+  text-align: center;
 }
 
 .qr-image {
   max-width: 16rem;
-  margin: 0 auto;
+  margin: var(--space-3) auto 0;
+  background: #ffffff;
+  padding: var(--space-3);
+  border-radius: var(--radius-card);
 }
 
 .qr-image svg {
   width: 100%;
   height: auto;
+}
+
+.error {
+  color: var(--rh-red);
+  font-weight: 600;
 }
 
 /* Wider viewports: tablet and up */

@@ -173,9 +173,11 @@ const PLATFORM_CAPABILITIES: Record<PlatformRole, ReadonlySet<Capability>> = {
     'qr_token:replace',
     'price:manage',
     'site_role:invite_initial_manager',
-    // Revoke a Manager (SDD §7, §11.1). Held on the platform axis so it applies
-    // cross-site, the same way qr_token:replace sits on both axes.
+    // Revoke a Manager or authorized user (SDD §7, §11.1) and change an authorized
+    // user's approval limit. Held on the platform axis so they apply cross-site, the
+    // same way qr_token:replace sits on both axes.
     'site_role:revoke',
+    'site_role:set_limit',
     'payment:capture',
     'payment:cancel',
     'ops:mark_completed',

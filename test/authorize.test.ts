@@ -197,11 +197,17 @@ test('a company_admin may onboard sites, bathrooms, QR, and price with no SiteRo
   });
 });
 
-test('a company_admin may revoke a SiteRole (a Manager) cross-site', () => {
+test('a company_admin may revoke a SiteRole and set an authorized user limit cross-site', () => {
   const admin = principal(null, 'company_admin');
   assert.deepEqual(authorize(admin, { type: 'revoke_site_role', siteId: 'any-site' }), {
     allowed: true,
   });
+  assert.deepEqual(authorize(admin, { type: 'set_site_role_limit', siteId: 'any-site' }), {
+    allowed: true,
+  });
+  // ...but a Company Admin still never invites/deletes members or requests cleanings.
+  assert.equal(authorize(admin, { type: 'invite_site_role', siteId: 'any-site' }).allowed, false);
+  assert.equal(authorize(admin, { type: 'delete_site_role', siteId: 'any-site' }).allowed, false);
 });
 
 test('a company_admin may capture/cancel payments and mark completed cross-site', () => {

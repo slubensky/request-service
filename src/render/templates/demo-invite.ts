@@ -43,7 +43,8 @@ export function renderAcceptForm({ csrfToken, code = '', error }: AcceptFormOpti
  * and `role` reflect the accepter's ACTUAL authority at the site after the bridge, so a
  * superseded-duplicate accept reports real authority rather than a stale "pending". Both
  * roles activate in one step (Phase 6) -- there is no promotion, so the copy never mentions
- * one. */
+ * one. An activated manager gets a Continue link to their console (`/manager`); an
+ * authorized user has no console, so no link is shown (SDD §11.4). */
 export function renderAcceptResult({
   activated,
   role,
@@ -61,13 +62,17 @@ export function renderAcceptResult({
     message =
       'You are now an <strong>authorized user</strong>. You can request a cleaning — a request above your limit is sent to a manager for approval.';
   }
+  // A manager continues to their console; an authorized user has no console page.
+  const continueLink =
+    activated && role === 'manager'
+      ? '\n        <p><a class="button-link" href="/manager">Continue to your console</a></p>'
+      : '';
   const bodyHtml = `
       <header class="page-header">
         <h1>Invitation accepted</h1>
       </header>
       <section class="card">
-        <p>${message}</p>
-        <p><a href="/">Continue</a></p>
+        <p>${message}</p>${continueLink}
       </section>`;
   return renderLayout({ title: 'Invitation accepted', bodyHtml, scripts: [] });
 }

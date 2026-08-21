@@ -283,6 +283,11 @@ test('renderAcceptResult reflects real authority and never mentions promotion', 
     assert.doesNotMatch(html, /promote/i);
     assert.doesNotMatch(html, /still pending/i);
   }
+
+  // A manager gets a Continue link to their console; an authorized user has none.
+  assert.match(managerHtml, /href="\/manager"/);
+  assert.doesNotMatch(userHtml, /<a\s/);
+  assert.doesNotMatch(inactiveHtml, /<a\s/);
 });
 
 test('a superseded-duplicate accept reports the resolved authority, not the redeemed row (no false "pending")', async () => {

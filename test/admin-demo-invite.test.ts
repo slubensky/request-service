@@ -52,7 +52,7 @@ async function inviteAndListAsAdminConsoleWould(
   }
   const siteList = await listSitesWithBathrooms(db);
   const pendingIds = siteList.flatMap((entry) =>
-    entry.managers.filter((m) => m.status === 'pending').map((m) => m.id),
+    entry.members.filter((m) => m.status === 'pending').map((m) => m.id),
   );
   const demoCodes = demoMode
     ? await unusedCodesForSiteRoles(db, pendingIds)
@@ -94,7 +94,7 @@ test('DEMO_MODE off: no code is minted and admin console markup is unchanged', a
     // No code exists at all -- the route never called issueDemoInviteCode.
     assert.equal(demoCodes.size, 0);
     const pendingIds = siteList.flatMap((entry) =>
-      entry.managers.filter((m) => m.status === 'pending').map((m) => m.id),
+      entry.members.filter((m) => m.status === 'pending').map((m) => m.id),
     );
     assert.equal((await unusedCodesForSiteRoles(db, pendingIds)).size, 0);
 
