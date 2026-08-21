@@ -13,6 +13,13 @@ import type { InvitableRole } from '../../manager/service.js';
 export interface AcceptFormOptions {
   /** Double-submit CSRF token; echoed in a hidden field and matched to the cookie. */
   csrfToken: string;
+  /** Random nonce identifying which per-request cookie carries the matching token (see
+   * demo/routes.ts): a single fixed cookie name would let a second `GET /invite/accept`
+   * (a different invite, or the same one reloaded) silently overwrite an earlier one's
+   * cookie in the same browser, breaking that earlier tab's submit with a false CSRF
+   * failure. Echoed in its own hidden field so the server can look up the *specific*
+   * cookie this page's token was paired with. */
+  csrfNonce: string;
   /** Prefilled code (e.g. from the console's accept link). */
   code?: string;
   /** Optional error to surface above the form (invalid submission). */
@@ -20,7 +27,12 @@ export interface AcceptFormOptions {
 }
 
 /** Renders the code-entry form. Zero-JS: submits as a normal urlencoded POST. */
-export function renderAcceptForm({ csrfToken, code = '', error }: AcceptFormOptions): string {
+export function renderAcceptForm({
+  csrfToken,
+  csrfNonce,
+  code = '',
+  error,
+}: AcceptFormOptions): string {
   const errorHtml = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
   const bodyHtml = `
       <header class="page-header">
@@ -30,6 +42,7 @@ export function renderAcceptForm({ csrfToken, code = '', error }: AcceptFormOpti
       ${errorHtml}
       <form class="stack-form" method="post" action="/invite/accept">
         <input type="hidden" name="demo_csrf" value="${escapeHtml(csrfToken)}" />
+        <input type="hidden" name="demo_csrf_nonce" value="${escapeHtml(csrfNonce)}" />
         <label>Invitation code
           <input name="code" required maxlength="32" autocomplete="off"
                  inputmode="text" value="${escapeHtml(code)}" />

@@ -27,7 +27,7 @@ import type { PgConnection } from '../src/db/client.js';
 import {
   registerDemoRoutes,
   isDemoAcceptSubmission,
-  DEMO_CSRF_COOKIE,
+  DEMO_CSRF_COOKIE_PREFIX,
 } from '../src/demo/routes.js';
 import { isDemoMode } from '../src/demo/config.js';
 import {
@@ -145,10 +145,25 @@ async function soleInviteId(db: TestDatabase['db'], siteId: string): Promise<str
 
 interface FormDrive {
   token: string;
+  nonce: string;
+  cookieHeader: string;
   res: CapturingResponse;
 }
 
-/** Drives GET /invite/accept, returning the minted double-submit token. */
+/** Finds a Set-Cookie entry whose name starts with `prefix` and returns its full
+ * `name=value` pair (nonce-scoped cookie names vary per request; see demo/routes.ts). */
+function cookieByPrefix(cookies: string[], prefix: string): { name: string; value: string } {
+  const match = cookies.find((cookie) => cookie.startsWith(prefix));
+  assert.ok(match, `a cookie starting with ${prefix} is set`);
+  const pair = match.split(';', 1)[0] ?? '';
+  const eq = pair.indexOf('=');
+  const name = pair.slice(0, eq);
+  const value = decodeURIComponent(pair.slice(eq + 1));
+  return { name, value };
+}
+
+/** Drives GET /invite/accept, returning the minted double-submit token, its nonce, and
+ * the exact `Cookie` header a browser would send back (nonce-named, per demo/routes.ts). */
 async function driveForm(router: Router, code?: string): Promise<FormDrive> {
   const matched = router.match('GET', '/invite/accept');
   assert.ok(matched, 'GET /invite/accept is registered in demo mode');
@@ -160,24 +175,23 @@ async function driveForm(router: Router, code?: string): Promise<FormDrive> {
     query: code ? { code } : {},
   };
   await matched.handler(ctx);
-  const token = cookieValue(setCookies(res), DEMO_CSRF_COOKIE);
-  assert.ok(token, 'a demo CSRF cookie is minted');
-  return { token, res };
+  const { name, value: token } = cookieByPrefix(setCookies(res), DEMO_CSRF_COOKIE_PREFIX);
+  const nonce = name.slice(DEMO_CSRF_COOKIE_PREFIX.length);
+  return { token, nonce, cookieHeader: `${name}=${token}`, res };
 }
 
-/** Drives POST /invite/accept with an explicit cookie token and form fields. */
+/** Drives POST /invite/accept with an explicit cookie header and form fields. */
 async function drivePost(
   router: Router,
   fields: Record<string, string>,
-  cookieToken: string | undefined,
+  cookieHeader: string | undefined,
 ): Promise<CapturingResponse> {
   const matched = router.match('POST', '/invite/accept');
   assert.ok(matched, 'POST /invite/accept is registered in demo mode');
   const body = new URLSearchParams(fields).toString();
-  const cookie = cookieToken ? `${DEMO_CSRF_COOKIE}=${cookieToken}` : undefined;
   const res = new CapturingResponse();
   const ctx: RouteContext = {
-    req: fakePostRequest(body, cookie),
+    req: fakePostRequest(body, cookieHeader),
     res: res as unknown as ServerResponse,
     params: {},
     query: {},
@@ -198,8 +212,12 @@ test('happy path: a manager code activates the invite and mints a working sessio
       const router = new Router();
       registerDemoRoutes(router, demoRuntime(db));
 
-      const { token } = await driveForm(router, code);
-      const res = await drivePost(router, { demo_csrf: token, code }, token);
+      const { token, nonce, cookieHeader } = await driveForm(router, code);
+      const res = await drivePost(
+        router,
+        { demo_csrf: token, demo_csrf_nonce: nonce, code },
+        cookieHeader,
+      );
 
       assert.equal(res.statusCode, 200);
       assert.match(res.body, /authorized/i);
@@ -224,8 +242,16 @@ test('happy path: a manager code activates the invite and mints a working sessio
         .limit(1);
       assert.ok(row?.usedAt, 'the code is marked used');
 
-      const { token: token2 } = await driveForm(router, code);
-      const reuse = await drivePost(router, { demo_csrf: token2, code }, token2);
+      const {
+        token: token2,
+        nonce: nonce2,
+        cookieHeader: cookieHeader2,
+      } = await driveForm(router, code);
+      const reuse = await drivePost(
+        router,
+        { demo_csrf: token2, demo_csrf_nonce: nonce2, code },
+        cookieHeader2,
+      );
       assert.equal(reuse.statusCode, 400);
       assert.match(reuse.body, /already been used/i);
       assert.equal(cookieValue(setCookies(reuse), SESSION_COOKIE), undefined);
@@ -382,10 +408,14 @@ test('the demo accept POST fails closed on a double-submit CSRF mismatch', async
 
       const router = new Router();
       registerDemoRoutes(router, demoRuntime(db));
-      const { token } = await driveForm(router, code);
+      const { nonce, cookieHeader } = await driveForm(router, code);
 
       // Submitted form token does not match the cookie token: reject, no session.
-      const res = await drivePost(router, { demo_csrf: 'not-the-token', code }, token);
+      const res = await drivePost(
+        router,
+        { demo_csrf: 'not-the-token', demo_csrf_nonce: nonce, code },
+        cookieHeader,
+      );
       assert.equal(res.statusCode, 403);
       assert.equal(cookieValue(setCookies(res), SESSION_COOKIE), undefined);
 
@@ -396,6 +426,56 @@ test('the demo accept POST fails closed on a double-submit CSRF mismatch', async
         .where(eq(demoInviteCodes.code, code))
         .limit(1);
       assert.equal(row?.usedAt, null);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("Phase 9 fix: opening a second accept link does not break the first one's submission", async () => {
+  await withDemoMode('1', async () => {
+    const { db, client } = await createTestDatabase();
+    try {
+      const siteId = await seedSite(db);
+      await inviteInitialManager(db, siteId, '+15555550101');
+      await inviteSiteMember(db, siteId, 'authorized_user', '+15555550102', 3000);
+      const [roleA, roleB] = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+      assert.ok(roleA && roleB);
+      const { code: codeA } = await issueDemoInviteCode(db, roleA.id);
+      const { code: codeB } = await issueDemoInviteCode(db, roleB.id);
+
+      const router = new Router();
+      registerDemoRoutes(router, demoRuntime(db));
+
+      // Two accept pages loaded in the same browser -- e.g. testing two invites, or the
+      // same link opened a second time -- must not collide on a shared cookie name.
+      const formA = await driveForm(router, codeA);
+      const formB = await driveForm(router, codeB);
+      assert.notEqual(
+        formA.cookieHeader,
+        formB.cookieHeader,
+        'each accept page mints an independently-named cookie',
+      );
+
+      // Submitting the FIRST (older) page, after the second has already been loaded,
+      // must still succeed -- this is the exact regression: a single fixed cookie name
+      // would have let form B's GET overwrite form A's cookie in the browser.
+      const resA = await drivePost(
+        router,
+        { demo_csrf: formA.token, demo_csrf_nonce: formA.nonce, code: codeA },
+        formA.cookieHeader,
+      );
+      assert.equal(resA.statusCode, 200);
+      assert.doesNotMatch(resA.body, /Invalid or missing form token/);
+
+      // The second page's own submission still works too.
+      const resB = await drivePost(
+        router,
+        { demo_csrf: formB.token, demo_csrf_nonce: formB.nonce, code: codeB },
+        formB.cookieHeader,
+      );
+      assert.equal(resB.statusCode, 200);
+      assert.doesNotMatch(resB.body, /Invalid or missing form token/);
     } finally {
       await client.close();
     }

@@ -38,11 +38,27 @@ import { acceptDemoInviteCode } from './service.js';
 import { isDemoMode } from './config.js';
 
 const ACCEPT_PATH = '/invite/accept';
-export const DEMO_CSRF_COOKIE = 'rs_demo_csrf';
+// The cookie name is scoped per-request by a random nonce (see `demoCsrfCookieName`),
+// not a single fixed name -- a fixed name would let a second `GET /invite/accept` (a
+// different invite, or the same one reloaded) silently overwrite an earlier one's
+// cookie in the same browser, breaking that earlier tab's submit with a false CSRF
+// failure (confirmed by reproduction: two invite links opened in the same browser,
+// submitting the first one fails once the second has been loaded). Exported for tests.
+export const DEMO_CSRF_COOKIE_PREFIX = 'rs_demo_csrf_';
 const DEMO_CSRF_MAX_AGE_SECONDS = 600;
 
 function randomToken(): string {
   return randomBytes(16).toString('base64url');
+}
+
+function randomNonce(): string {
+  return randomBytes(8).toString('hex');
+}
+
+/** Builds the per-request cookie name from a nonce minted at `GET /invite/accept` time
+ * and echoed back in the form's hidden `demo_csrf_nonce` field (see AcceptFormOptions). */
+function demoCsrfCookieName(nonce: string): string {
+  return `${DEMO_CSRF_COOKIE_PREFIX}${nonce}`;
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -55,24 +71,34 @@ function constantTimeEquals(a: string, b: string): boolean {
 }
 
 /**
- * Writes the accept form with a freshly minted double-submit token: the token
- * goes into an HttpOnly `rs_demo_csrf` cookie and the matching hidden field, so
- * the subsequent POST can prove same-origin provenance without a session.
+ * Writes the accept form with a freshly minted double-submit token: the token goes into
+ * an HttpOnly, nonce-named cookie and a matching hidden field (plus the nonce itself in
+ * its own hidden field), so the subsequent POST can prove same-origin provenance without
+ * a session -- and so a second concurrently-open accept page in the same browser mints
+ * its own independently-named cookie rather than overwriting this one's.
  */
 function respondWithForm(
   res: ServerResponse,
   status: number,
   options: { code?: string; error?: string },
 ): void {
+  const nonce = randomNonce();
   const token = randomToken();
-  const cookie = serializeCookie(DEMO_CSRF_COOKIE, token, {
+  const cookie = serializeCookie(demoCsrfCookieName(nonce), token, {
     httpOnly: true,
     sameSite: 'Lax',
     maxAge: DEMO_CSRF_MAX_AGE_SECONDS,
   });
   res.setHeader('Set-Cookie', cookie);
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(renderAcceptForm({ csrfToken: token, code: options.code, error: options.error }));
+  res.end(
+    renderAcceptForm({
+      csrfToken: token,
+      csrfNonce: nonce,
+      code: options.code,
+      error: options.error,
+    }),
+  );
 }
 
 function handleAcceptForm({ res, query }: RouteContext): void {
@@ -99,10 +125,16 @@ async function handleAcceptSubmit(runtime: AuthRuntime, ctx: RouteContext): Prom
     throw error;
   }
 
-  // Double-submit CSRF: the hidden field must equal the cookie minted by GET.
-  const cookieToken = parseCookies(req.headers.cookie)[DEMO_CSRF_COOKIE];
+  // Double-submit CSRF: the hidden fields must match the nonce-named cookie minted by
+  // GET (see demoCsrfCookieName) -- looking the cookie up by a name built from the
+  // submitted nonce, rather than one fixed name, is what lets two concurrently open
+  // accept pages in the same browser each keep their own working cookie.
+  const submittedNonce = (fields.demo_csrf_nonce ?? '').slice(0, 64);
+  const cookieToken = submittedNonce
+    ? parseCookies(req.headers.cookie)[demoCsrfCookieName(submittedNonce)]
+    : undefined;
   const submittedToken = fields.demo_csrf ?? '';
-  if (!cookieToken || !constantTimeEquals(cookieToken, submittedToken)) {
+  if (!submittedNonce || !cookieToken || !constantTimeEquals(cookieToken, submittedToken)) {
     sendText(res, 403, 'Invalid or missing form token');
     return;
   }
@@ -132,7 +164,7 @@ async function handleAcceptSubmit(runtime: AuthRuntime, ctx: RouteContext): Prom
   });
   res.setHeader('Set-Cookie', [
     sessionCookie,
-    clearCookie(DEMO_CSRF_COOKIE, { httpOnly: true, sameSite: 'Lax' }),
+    clearCookie(demoCsrfCookieName(submittedNonce), { httpOnly: true, sameSite: 'Lax' }),
   ]);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(renderAcceptResult({ activated: outcome.activated, role: outcome.role }));
