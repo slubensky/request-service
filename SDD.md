@@ -723,20 +723,21 @@ here. Format:
 ### #011 — 2026-08-21T19:15:00-04:00
 
 **Bugfix**: `isUniqueViolation` (§3.3, the shared detector behind every "conditional write
-+ defensive catch" idiom, including the duplicate-active-request guard §9.4) stopped
-detecting real Postgres unique violations, silently breaking the "never surfaces as an
-unhandled 500" guarantee at every one of its three call sites. Confirmed against a real
-Postgres 16 instance (not PGlite): reactivating a revoked manager (per #010's fix) hit a
-genuine `23505` on `site_roles_site_user_key` — expected and meant to be caught as a
-graceful no-op — but it propagated as an unhandled request error (HTTP 500) instead.
-Root cause: this drizzle-orm version wraps the driver's raw error (carrying `.code`) in a
-`DrizzleQueryError`, attaching the original as `.cause` rather than spreading its
-properties onto the top-level object; the detector only ever inspected the top level, so
-it always returned false against the actual wrapped shape every real call site receives.
-Fix: `isUniqueViolation` now walks the `.cause` chain (depth-bounded, cycle-safe) so it
-recognizes a `23505` regardless of how many wrapper layers sit between it and the caller.
-No behavior change to any caller's contract — each site's documented "caught, not
-unhandled" guarantee now actually holds, exactly as already specified.
+
+- defensive catch" idiom, including the duplicate-active-request guard §9.4) stopped
+  detecting real Postgres unique violations, silently breaking the "never surfaces as an
+  unhandled 500" guarantee at every one of its three call sites. Confirmed against a real
+  Postgres 16 instance (not PGlite): reactivating a revoked manager (per #010's fix) hit a
+  genuine `23505` on `site_roles_site_user_key` — expected and meant to be caught as a
+  graceful no-op — but it propagated as an unhandled request error (HTTP 500) instead.
+  Root cause: this drizzle-orm version wraps the driver's raw error (carrying `.code`) in a
+  `DrizzleQueryError`, attaching the original as `.cause` rather than spreading its
+  properties onto the top-level object; the detector only ever inspected the top level, so
+  it always returned false against the actual wrapped shape every real call site receives.
+  Fix: `isUniqueViolation` now walks the `.cause` chain (depth-bounded, cycle-safe) so it
+  recognizes a `23505` regardless of how many wrapper layers sit between it and the caller.
+  No behavior change to any caller's contract — each site's documented "caught, not
+  unhandled" guarantee now actually holds, exactly as already specified.
 
 ### #010 — 2026-08-21T14:30:00-04:00
 
