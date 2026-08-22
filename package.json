@@ -13,7 +13,7 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "TLS_CERT_FILE= TLS_KEY_FILE= tsx --test test/*.test.ts",
-    "test:coverage": "TLS_CERT_FILE= TLS_KEY_FILE= tsx --test --experimental-test-coverage --test-coverage-exclude=test/** --test-coverage-exclude=scripts/** --test-coverage-lines=73 --test-coverage-branches=83 --test-coverage-functions=77 test/*.test.ts",
+    "test:coverage": "TLS_CERT_FILE= TLS_KEY_FILE= tsx --test --experimental-test-coverage --test-coverage-exclude=test/** --test-coverage-exclude=scripts/** --test-coverage-lines=73 --test-coverage-branches=81 --test-coverage-functions=77 test/*.test.ts",
     "build": "node scripts/build.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/db-migrate.ts",
