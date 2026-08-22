@@ -268,6 +268,8 @@ All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Pa
 - QR resolution is **rate-limited** at the endpoint level to blunt brute-force enumeration (see AGENTS.md security rules on complete mediation and fail-safe defaults; hardened rate limiting is out of scope for MVP per §1.5).
 - A **Company Admin** issues the initial QRToken for a Bathroom as part of onboarding (alongside creating the Site, Bathroom, and price). Tags are **revocable and replaceable**: a Company Admin can invalidate and reissue a QRToken for any Site, and a **Site Manager** may likewise replace the QRToken at their own site (e.g., a printed tag is lost or compromised), without any change to the Bathroom's identity or history.
 - A resolved QRToken identifies a Bathroom **only**. It never authenticates a person and never itself authorizes any action — see §3 for why authority requires a separate SiteRole lookup.
+- The raw token is shown **exactly once**, on the issuance/replace result page, and is never persisted or re-displayed afterward (only its hash is stored — see above). There is deliberately no "view current QR" recovery path: the printed/written tag itself is the only durable copy. If it's lost, the only remedy is to replace it, which is the same "Issue / replace QR" action as the initial issuance (changelog #015).
+- The scan URL's scheme (`http://` vs `https://`) always matches the scheme the issuing request actually arrived over when `PUBLIC_BASE_URL` is unset — never hardcoded — so a QR issued from a local HTTPS dev server (§12/§13) doesn't encode a scheme mismatch (changelog #015).
 - **NFC tags reuse the same token and URL** — there is no separate `NfcTag` entity or issuance path. The `GET /s/:token` URL rendered alongside every issued QR (§11.3) is the complete scan target for either medium: writing that same URL to an NFC tag (any standard NFC-writing phone app) is deliberately equivalent to printing the QR — same opaque token, same one-way hash lookup, same revoke/replace semantics, same rate limiting. A site with both a printed QR and a written NFC tag for one Bathroom is just two physical copies of one token until either is replaced.
 
 ## 6. Authentication (Amazon Cognito)
@@ -739,6 +741,37 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #015 — 2026-08-22T09:15:00-04:00
+
+**Bugfix (follow-on to #014, no production behavior impact)**: found while verifying #014 on a
+real local machine. Two issues:
+
+(a) A newly issued QR's printed scan URL was `http://` even when the admin console was itself
+being served over `https://` (the local dev HTTPS now required by #014). Root cause:
+`scanBaseUrl` (`src/admin/routes.ts`) hardcoded the `http://` scheme in its fallback (used
+whenever `PUBLIC_BASE_URL` is unset) — harmless before #014, when local dev was always plain
+HTTP, but wrong as soon as dev started running real HTTPS. Fix: derive the scheme from
+whether the issuing request's socket is actually encrypted (`req.socket.encrypted`, true for
+an `https.Server` connection) instead of hardcoding `http://`.
+
+(b) Separately, every test that starts a real server via `createHttpServer()` (7+ files)
+unconditionally inherited `TLS_CERT_FILE`/`TLS_KEY_FILE` from the shell environment — exactly
+what the README instructs a developer to export before running _any_ script, including
+`npm test`. With those set, `createHttpServer()` starts an HTTPS server while every test's
+`fetch` hits it over plain `http://`, failing the entire HTTP-driven test suite. Fix:
+`npm test`/`npm run test:coverage` now explicitly clear both vars for the test run
+(`package.json`), isolating tests from whatever's exported in the developer's shell for
+`npm run dev`.
+
+Also clarified in §5: there is no "view existing QR" option by design (only the token's hash
+is ever stored, per the original §5 invariant) — "Issue / replace QR" is deliberately the same
+single action for first issuance and for replacing a lost tag.
+
+Tests: `test/admin-qr-scheme.test.ts` (new — issuing a QR over real HTTP vs. real HTTPS
+prints the matching scheme; confirmed the HTTPS case fails without the fix). Full gate clean
+(`npm test` 200 pass, including with `TLS_CERT_FILE`/`TLS_KEY_FILE` exported ambiently;
+`test:coverage`, `lint`, `build`).
 
 ### #014 — 2026-08-21T22:40:00-04:00
 
