@@ -92,3 +92,62 @@ terraform init \
   VPC endpoints if tightening cost later.
 - The Aurora security group accepts PostgreSQL **only** from the app security group
   (deny by default).
+
+## Lean test deployment (`infra/lean/`)
+
+A separate, throwaway composition for testing real Cognito SMS OTP without the
+production stack's cost: one EC2 instance running Postgres + the app via
+docker-compose, plus a real Cognito user pool (the same `modules/cognito` the
+production composition uses, unchanged). No Aurora, no App Runner, no NAT/VPC
+connector, no Route53/ACM, no Secrets Manager. Uses **local state** (not the
+shared S3 backend) since it's meant to be stood up and torn down freely — never
+`terraform apply` it against the same backend as `../main.tf`. Not validated by
+CI's `terraform validate` step (that runs against `infra/` only), though `terraform
+fmt -check -recursive` does cover it since CI runs recursively from `infra/`.
+
+**Known limitation**: WebAuthn/passkeys require a real registrable domain, not a
+bare IP, so passkey enrollment does not work against this deployment — it tests
+SMS OTP only. Also, since the app terminates TLS itself with a self-signed
+certificate (there is no real domain to get a trusted cert for), your browser
+will show a one-time security warning the first time you visit — click through it.
+
+### Prerequisites
+
+- **Check SNS SMS sandbox status first.** New AWS accounts default to SMS
+  _sandbox_ mode, which only delivers to phone numbers you've pre-verified in the
+  SNS/Pinpoint console. If you're still in sandbox, verify your test number there
+  (or request production access) before testing — otherwise the OTP silently never
+  arrives.
+- Create or import an EC2 key pair in the AWS console (for optional SSH access;
+  the deployment itself doesn't need you to SSH in — user-data does everything).
+
+### Deploy
+
+```sh
+cd infra/lean
+terraform init
+terraform apply \
+  -var="cognito_domain_prefix=<pick-a-globally-unique-prefix>" \
+  -var="key_name=<your-ec2-key-pair-name>" \
+  -var="allowed_ssh_cidr=<your-ip>/32"
+```
+
+Wait a minute or two after apply for the instance's user-data to finish (installs
+Docker, generates the self-signed cert, clones this repo, builds the image, runs
+migrations, and starts the app). Then:
+
+```sh
+terraform output app_url    # https://<elastic-ip>:3000
+```
+
+Visit that URL, click through the certificate warning, and walk the real
+Cognito Hosted UI → SMS OTP → callback flow. `terraform output ssh_command` gets
+you in for troubleshooting (`docker compose logs` in `/opt/app`) if needed.
+
+### Tear down
+
+```sh
+terraform destroy
+```
+
+No `deletion_protection` or similar blocks this — everything here is disposable.

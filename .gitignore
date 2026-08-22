@@ -18,13 +18,13 @@ npm-debug.log*
 .vscode/
 .idea/
 
-# Terraform
-infra/.terraform/
-infra/*.tfstate
-infra/*.tfstate.*
-infra/crash.log
-infra/*.tfvars
-infra/*.tfvars.json
-infra/override.tf
-infra/override.tf.json
+# Terraform -- ** so this covers both infra/ and nested compositions like infra/lean/
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/crash.log
+infra/**/*.tfvars
+infra/**/*.tfvars.json
+infra/**/override.tf
+infra/**/override.tf.json
 
