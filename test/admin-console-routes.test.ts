@@ -1,0 +1,171 @@
+/**
+ * HTTP-level coverage for two Company Admin console routes that had none: adding a
+ * bathroom and inviting the initial manager (SDD §11.1, §11.3). Driven over real HTTP
+ * (createHttpServer against PGlite), same pattern as test/admin-authorized-users.test.ts.
+ */
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import type { AddressInfo } from 'node:net';
+import { createHttpServer } from '../src/server/app.js';
+import type { AuthRuntime } from '../src/auth/config.js';
+import type { PgConnection } from '../src/db/client.js';
+import { csrfTokenForSession } from '../src/auth/csrf.js';
+import { signSession } from '../src/auth/session.js';
+import { createSite } from '../src/admin/service.js';
+import { bathrooms, siteRoles, users } from '../src/db/schema.js';
+import { eq } from 'drizzle-orm';
+import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
+
+const SESSION_SECRET = 'test-session-secret-placeholder';
+
+function runtimeFor(db: TestDatabase['db']): AuthRuntime {
+  return {
+    cognito: null,
+    sessionSecret: SESSION_SECRET,
+    connection: { db, pool: undefined } as unknown as PgConnection,
+    jwksFor: () => {
+      throw new Error('jwks must not be resolved by these routes');
+    },
+  };
+}
+
+function sessionAndCsrf(userId: string): { cookie: string; csrf: string } {
+  const token = signSession({ userId, sub: `sub-${userId}` }, SESSION_SECRET);
+  return { cookie: token, csrf: csrfTokenForSession(token, SESSION_SECRET) };
+}
+
+async function withRunningServer<T>(
+  runtime: AuthRuntime,
+  fn: (baseUrl: string) => Promise<T>,
+): Promise<T> {
+  delete process.env.TLS_CERT_FILE;
+  delete process.env.TLS_KEY_FILE;
+  const server = createHttpServer(runtime);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+}
+
+async function seedAdmin(db: TestDatabase['db']) {
+  const site = await createSite(db, {
+    name: 'Central Plaza',
+    address: '1 Market St',
+    timezone: 'America/New_York',
+    currency: 'usd',
+    fixedPriceCents: 4500,
+  });
+  const [admin] = await db
+    .insert(users)
+    .values({ cognitoSub: 'sub-admin', platformRole: 'company_admin' })
+    .returning();
+  assert.ok(admin);
+  return { siteId: site.id, adminId: admin.id };
+}
+
+test('POST .../bathrooms adds a bathroom; rejects an unknown site with 404', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, adminId } = await seedAdmin(db);
+    const admin = sessionAndCsrf(adminId);
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sites/${siteId}/bathrooms`, {
+        method: 'POST',
+        headers: {
+          cookie: `rs_session=${admin.cookie}`,
+          'x-csrf-token': admin.csrf,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ label: 'Ground floor' }).toString(),
+      });
+      assert.equal(res.status, 204);
+      const rows = await db.select().from(bathrooms).where(eq(bathrooms.siteId, siteId));
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.label, 'Ground floor');
+
+      const missingSiteId = '00000000-0000-0000-0000-000000000000';
+      const badRes = await fetch(`${baseUrl}/admin/sites/${missingSiteId}/bathrooms`, {
+        method: 'POST',
+        headers: {
+          cookie: `rs_session=${admin.cookie}`,
+          'x-csrf-token': admin.csrf,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ label: 'Nowhere' }).toString(),
+      });
+      assert.equal(badRes.status, 404);
+
+      const emptyLabelRes = await fetch(`${baseUrl}/admin/sites/${siteId}/bathrooms`, {
+        method: 'POST',
+        headers: {
+          cookie: `rs_session=${admin.cookie}`,
+          'x-csrf-token': admin.csrf,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ label: '' }).toString(),
+      });
+      assert.equal(emptyLabelRes.status, 400);
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST .../managers sends an invite, then no-ops idempotently on the same phone', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, adminId } = await seedAdmin(db);
+    const admin = sessionAndCsrf(adminId);
+    await withRunningServer(runtimeFor(db), async (baseUrl) => {
+      const first = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
+        method: 'POST',
+        headers: {
+          cookie: `rs_session=${admin.cookie}`,
+          'x-csrf-token': admin.csrf,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ phone: '+15550001234' }).toString(),
+      });
+      assert.equal(first.status, 200);
+      assert.match(await first.text(), /Invitation sent/);
+      const roles = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+      assert.equal(roles.length, 1);
+      assert.equal(roles[0]?.role, 'manager');
+
+      // Same phone again: idempotent no-op (SDD §11.1), no second SiteRole created.
+      const second = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
+        method: 'POST',
+        headers: {
+          cookie: `rs_session=${admin.cookie}`,
+          'x-csrf-token': admin.csrf,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ phone: '+15550001234' }).toString(),
+      });
+      assert.equal(second.status, 200);
+      assert.match(await second.text(), /already a member/);
+      const rolesAfter = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+      assert.equal(rolesAfter.length, 1);
+
+      // Malformed phone: rejected by parsePhone's format check before any invite is created.
+      const badFormat = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
+        method: 'POST',
+        headers: {
+          cookie: `rs_session=${admin.cookie}`,
+          'x-csrf-token': admin.csrf,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ phone: 'not-a-phone-number!!' }).toString(),
+      });
+      assert.equal(badFormat.status, 400);
+    });
+  } finally {
+    await client.close();
+  }
+});
