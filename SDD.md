@@ -742,6 +742,50 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #017 — 2026-08-22T15:30:00-04:00
+
+**Tooling (deployment, no product-facing/spec behavior change)**: added a second,
+low-cost Terraform composition (`infra/lean/`) for testing the real Cognito SMS
+OTP flow without standing up the full production stack (`infra/main.tf`'s App
+Runner + Aurora + NAT/VPC connector, roughly $80-100/month). The lean composition
+reuses `modules/cognito` unchanged and adds a new `modules/ec2_host`: one EC2
+instance (default VPC, no NAT) running Postgres + the app via docker-compose,
+fronted by a self-signed certificate on its own Elastic IP (no App Runner/Aurora,
+no Route53/ACM, no Secrets Manager -- DB credentials and the session secret are
+Terraform-generated (`random_password`/`random_id`) and passed to the instance via
+user-data instead). Uses local Terraform state, deliberately separate from the
+production composition's shared S3 backend, since it is meant to be stood up and
+torn down freely.
+
+Two real constraints this surfaced, both documented in `infra/README.md`:
+(a) WebAuthn/passkeys require a real registrable domain per spec, so they are not
+testable against a bare Elastic IP -- this deployment exercises SMS OTP only;
+(b) the production composition's App Runner env wiring (`DB_HOST`/`DB_PORT`/
+`DB_NAME` plus a Secrets-Manager-resolved `DB_CREDENTIALS_ARN`) has no code path
+that assembles those into the single `DATABASE_URL` the app actually reads
+(`src/auth/config.ts`) -- a real gap in `infra/main.tf`'s production path,
+sidestepped here (not fixed) by composing `DATABASE_URL` directly in
+docker-compose instead, since the lean deployment's Postgres has a plain,
+non-rotating password. Fixing the production path's gap is out of scope for this
+change and remains open.
+
+New files: `Dockerfile`, `.dockerignore`, `docker-compose.yml` (repo root -- used
+by the lean deployment's EC2 instance, not by the production composition, which
+still has no built image); `infra/modules/ec2_host/*`; `infra/lean/*`. `.gitignore`
+broadened (`infra/*.tfvars` etc. -> `infra/**/*.tfvars`) so the new nested
+composition's local state/tfvars are excluded the same way the production one's
+already are.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate` against
+both compositions (a real `terraform` binary, matching CI's pinned 1.9.8, since
+this repo has no local install by default) and `terraform plan` against `infra/lean`
+with placeholder variables (fails only at the AWS credentials check, as expected
+with no account access in this environment). `docker compose config` confirmed
+env-var substitution and `DATABASE_URL` assembly resolve correctly; the image
+itself was not build-tested (no Docker daemon available in this environment) --
+flagged as unverified in the runbook. `npm run lint`/`build` unaffected (no `src/`
+changes).
+
 ### #016 — 2026-08-22T10:05:00-04:00
 
 **Tooling (test gate, no product-facing change)**: `npm run test:coverage`'s branch-coverage

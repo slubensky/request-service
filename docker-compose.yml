@@ -1,0 +1,49 @@
+# Lean test deployment (infra/lean, SDD.md changelog #017): the whole app on
+# one host -- Postgres plus the SSR container -- against a real AWS Cognito
+# user pool for SMS OTP. Not used by the production path (infra/main.tf),
+# which targets App Runner + Aurora instead. Values come from a `.env` file
+# in this directory (docker compose loads it automatically); infra/lean's
+# EC2 user-data writes that file on first boot.
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: request_service
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    ports:
+      - '${APP_PORT}:${APP_PORT}'
+    environment:
+      DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/request_service
+      SESSION_SECRET: ${SESSION_SECRET}
+      PORT: ${APP_PORT}
+      # Self-signed -- there is no real domain in this configuration (a bare
+      # Elastic IP), so the app terminates TLS itself instead of a reverse
+      # proxy. See src/index.ts's fail-closed dev/TLS check.
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      PUBLIC_BASE_URL: https://${PUBLIC_IP}:${APP_PORT}
+      COGNITO_DOMAIN: ${COGNITO_DOMAIN}
+      COGNITO_ISSUER: ${COGNITO_ISSUER}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}
+      COGNITO_CLIENT_SECRET: ${COGNITO_CLIENT_SECRET}
+      COGNITO_REDIRECT_URI: https://${PUBLIC_IP}:${APP_PORT}/auth/callback
+      COGNITO_LOGOUT_REDIRECT_URI: https://${PUBLIC_IP}:${APP_PORT}/
+    volumes:
+      - ./certs:/certs:ro
+    # Migrations run against the sibling `db` service on every start
+    # (idempotent -- a no-op once already applied) since there is no separate
+    # migration step in this lean deployment.
+    command: sh -c "npm run db:migrate && node dist/index.js"
+
+volumes:
+  db-data:
