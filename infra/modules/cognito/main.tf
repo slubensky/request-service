@@ -47,16 +47,21 @@ resource "aws_cognito_user_pool" "this" {
 
   username_attributes      = ["phone_number"]
   auto_verified_attributes = ["phone_number"]
-  # No explicit mfa_configuration: this app never uses Cognito's legacy
-  # second-factor MFA system (SMS_OTP here is a first factor via
-  # sign_in_policy below, functionally separate). Explicitly setting
-  # mfa_configuration = "OFF" alongside the sms_configuration block below
-  # makes the AWS provider issue a follow-up SetUserPoolMfaConfig call that
-  # includes SMS-MFA details derived from sms_configuration while also saying
-  # MFA is off -- Cognito's API rejects that combination ("can't turn off MFA
-  # and configure an MFA together"). Omitting the argument leaves Cognito's
-  # own create-time default (already off) in place without triggering that
-  # call at all.
+  # OPTIONAL, not OFF, even though this app never gives any user a way to opt
+  # into Cognito's legacy second-factor MFA system. Cognito's SetUserPoolMfaConfig
+  # rejects MfaConfiguration=OFF (the default when this argument is omitted --
+  # confirmed by testing that against a real account, see SDD changelog #019/
+  # #020) whenever ANY MFA-adjacent sub-config is present in the same call --
+  # not just an SMS/software-token block explicitly enabled, but web_authn_
+  # configuration below too (WebAuthn passkeys can satisfy MFA per Cognito's
+  # own model, so its mere presence counts). We need both sms_configuration
+  # and web_authn_configuration for the first-factor choices below, so OFF is
+  # never compatible with this pool's shape. OPTIONAL is: it explicitly expects
+  # sms_configuration/software-token config to be present, and since nothing in
+  # this app ever lets a user set an MFA preference, Cognito never actually
+  # prompts anyone for a second factor -- OPTIONAL is a no-op in practice, not
+  # a real MFA requirement.
+  mfa_configuration = "OPTIONAL"
 
   sms_configuration {
     external_id    = var.sms_external_id
