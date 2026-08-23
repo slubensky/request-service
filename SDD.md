@@ -742,6 +742,29 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #018 — 2026-08-22T21:40:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: found while actually running the
+#017 lean deployment's `terraform apply` for the first time -- `terraform apply`
+failed with `InvalidParameterException: Password should be configured as one of
+the allowed first auth factors` when creating the Cognito user pool. Root cause:
+Cognito's `CreateUserPool` API rejects a pool whose `sign_in_policy.
+allowed_first_auth_factors` omits `PASSWORD`, even though this pool is meant to be
+passwordless-only (SMS OTP + WebAuthn) -- a real AWS API constraint neither this
+module nor its authoring session had ever exercised against a real account before
+(CI's `terraform validate` never calls the AWS API). Fix: `modules/cognito/main.tf`
+now includes `PASSWORD` in that list. No user of this app is ever given a
+password -- there is no self-service sign-up and the app's own auth routes only
+ever redirect to Cognito's managed login, never construct a password-flow URL --
+so this is a dormant capability Cognito requires be nominally allowed, not one
+this app offers or uses. Affects both the production composition (`infra/main.tf`)
+and the lean one (`infra/lean/`), since both use this shared module.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate` against
+both compositions (real `terraform` binary, no AWS credentials available in this
+environment, so the actual `CreateUserPool` call itself could not be re-verified
+here). `npm test`/`lint`/`build` unaffected (no `src/` changes).
+
 ### #017 — 2026-08-22T15:30:00-04:00
 
 **Tooling (deployment, no product-facing/spec behavior change)**: added a second,
