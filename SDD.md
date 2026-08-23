@@ -742,6 +742,37 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #019 — 2026-08-23T15:20:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: follow-on to #018, found on the
+next real `terraform apply` retry against the same AWS account. Progressed past
+Cognito user pool creation this time, then failed on the provider's follow-up
+call: `SetUserPoolMfaConfig ... InvalidParameterException: Invalid MFA
+configuration given, can't turn off MFA and configure an MFA together`. Root
+cause: `modules/cognito/main.tf` explicitly set `mfa_configuration = "OFF"`
+alongside a populated `sms_configuration` block. `sms_configuration` here exists
+for the SMS OTP _first-factor_ delivery role (`sign_in_policy`), not legacy MFA,
+but the `hashicorp/aws` provider (`~> 5.0`) derives SMS-MFA details from that same
+block whenever present and includes them in its follow-up
+`SetUserPoolMfaConfig` call regardless of `mfa_configuration`'s value --
+submitting SMS-MFA config while also saying MFA is off is what Cognito's API
+rejects. Fix: removed the explicit `mfa_configuration = "OFF"` argument;
+Cognito's own create-time default is already off when the argument is
+unset, and omitting it stops the provider from issuing that follow-up call
+at all. No behavior change intended -- this app never used the legacy MFA
+system either way.
+
+Since the previous apply had already created the user pool itself (the failure
+was on the follow-up call, not `CreateUserPool`), no manual Terraform state
+surgery is expected to be needed on retry -- Terraform should reconcile the
+difference on the next `terraform apply`.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+against both compositions (real `terraform` binary; the actual
+`SetUserPoolMfaConfig` behavior itself could not be re-verified here, no AWS
+credentials in this environment). `npm test`/`lint`/`build` unaffected (no
+`src/` changes).
+
 ### #018 — 2026-08-22T21:40:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: found while actually running the
