@@ -54,9 +54,15 @@ resource "aws_cognito_user_pool" "this" {
     sns_caller_arn = aws_iam_role.sms.arn
   }
 
-  # Passwordless first-factor choices offered to users.
+  # First-factor choices offered to users. Cognito's CreateUserPool API rejects
+  # a pool that omits PASSWORD from this list at creation time ("Password
+  # should be configured as one of the allowed first auth factors"), even
+  # though the intent here is passwordless-only -- PASSWORD stays allowed so
+  # `terraform apply` succeeds. No user of this app is ever given a password:
+  # there is no self-service sign-up and the app's own auth routes only ever
+  # redirect to Cognito's managed login, never construct a password-flow URL.
   sign_in_policy {
-    allowed_first_auth_factors = ["SMS_OTP", "WEB_AUTHN"]
+    allowed_first_auth_factors = ["PASSWORD", "SMS_OTP", "WEB_AUTHN"]
   }
 
   web_authn_configuration {
