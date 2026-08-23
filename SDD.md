@@ -770,12 +770,14 @@ MFA preference (no self-service path, no UI for it), Cognito never actually
 prompts anyone for a second factor under `OPTIONAL` -- functionally a no-op for
 every real user of this app, not an actual MFA requirement.
 
-Confidence note: unlike #018/#019, this fix could not be validated against a
-real `CreateUserPool`/`SetUserPoolMfaConfig` call in this environment (no AWS
-credentials) -- it rests on Cognito's documented API behavior and a confirmed
-matching bug/fix in another tool against the same underlying API, not a direct
-reproduction here. Flagged to the user as unverified pending their next real
-`terraform apply`.
+**Confirmed** by the user's real `terraform apply` against AWS: the Cognito user
+pool now creates successfully end-to-end. This fix could not be validated
+against a real `CreateUserPool`/`SetUserPoolMfaConfig` call in this environment
+(no AWS credentials) when it was written -- it rested on Cognito's documented
+API behavior and a confirmed matching bug/fix in another tool against the same
+underlying API, not a direct reproduction here -- but a real deploy now bears
+it out. The lean deployment (#017) is confirmed working end-to-end for its
+intended purpose: real Cognito SMS OTP sign-in.
 
 Validated with `terraform fmt -check -recursive` and `terraform validate`
 against both compositions (real `terraform` binary). `npm test`/`lint`/`build`
