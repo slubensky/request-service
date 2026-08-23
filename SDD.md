@@ -742,6 +742,45 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #020 — 2026-08-23T20:15:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: #019's fix did not actually
+resolve the problem -- the very next real `terraform apply` retry hit the
+identical `SetUserPoolMfaConfig ... "can't turn off MFA and configure an MFA
+together"` error, against a newly-created pool. #019's theory (that omitting
+`mfa_configuration` avoids the follow-up call) was wrong: the Terraform AWS
+provider's schema defaults that argument to `"OFF"` regardless of whether it's
+written explicitly, so omitting it changed nothing about the actual API call
+made.
+
+Root cause, confirmed this time against Cognito's real behavior (via a matching,
+previously-fixed bug in another IaC tool targeting the same API -- see
+sst/sst#5029): `SetUserPoolMfaConfig` rejects `MfaConfiguration: OFF` whenever
+_any_ MFA-adjacent sub-config is present in the same call -- not only an
+explicitly-enabled SMS/software-token block, but `WebAuthnConfiguration` too
+(Cognito's own model treats WebAuthn passkeys as capable of satisfying MFA, so
+its mere presence counts as "configuring an MFA"). This pool has both
+`sms_configuration` and `web_authn_configuration` set (both required for the
+first-factor choices in `sign_in_policy`), so `OFF` was never going to be
+compatible with this pool's shape, however it's spelled in Terraform. Fix:
+`mfa_configuration = "OPTIONAL"` instead -- Cognito's own docs describe `OPTIONAL`
+as the value that expects `sms_configuration`/software-token config to be
+present (unlike `OFF`), and since nothing in this app ever lets a user set an
+MFA preference (no self-service path, no UI for it), Cognito never actually
+prompts anyone for a second factor under `OPTIONAL` -- functionally a no-op for
+every real user of this app, not an actual MFA requirement.
+
+Confidence note: unlike #018/#019, this fix could not be validated against a
+real `CreateUserPool`/`SetUserPoolMfaConfig` call in this environment (no AWS
+credentials) -- it rests on Cognito's documented API behavior and a confirmed
+matching bug/fix in another tool against the same underlying API, not a direct
+reproduction here. Flagged to the user as unverified pending their next real
+`terraform apply`.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+against both compositions (real `terraform` binary). `npm test`/`lint`/`build`
+unaffected (no `src/` changes).
+
 ### #019 — 2026-08-23T15:20:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: follow-on to #018, found on the
