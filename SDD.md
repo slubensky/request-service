@@ -742,6 +742,35 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #026 — 2026-08-24T18:30:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: the user reported the lean
+EC2 instance's database being destroyed on repeated `terraform plan`/`apply`
+runs -- unexpected, since a plan never mutates anything and an apply should
+only replace a resource for a real config change.
+
+Root cause, confirmed against a real deploy: `infra/modules/ec2_host/main.tf`'s
+`data "aws_ami" "al2023"` uses `most_recent = true` with no pinning, so it
+re-resolves on every plan. AWS publishes new Amazon Linux 2023 AMIs often
+enough (sometimes every few days) that a later plan/apply can see the AMI ID
+drift from what the instance was actually created with -- and `ami` is a
+replace-forcing attribute on `aws_instance`, so Terraform destroys and
+recreates the whole instance. Since this deployment's Postgres data lives in a
+Docker volume on that same instance's local (ephemeral) disk, not anywhere
+durable, every such replacement silently wiped the database.
+
+Fix: `lifecycle { ignore_changes = [ami] }` on `aws_instance.this`. The AMI
+lookup still picks the latest AL2023 image the first time the instance is
+created (unchanged, no pinning to a specific pre-known AMI ID needed); later
+plans just stop drift-replacing the instance over a subsequent AMI release.
+`user_data` changes (e.g. #021-#025's infra edits) are deliberately still not
+ignored -- those are real, intended config changes that should still take
+effect; only the AMI's incidental "most recent" drift is silenced.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+(`infra/lean`, real `terraform` binary, `-backend=false`). `npm
+test`/`lint`/`build` unaffected (no `src/` changes).
+
 ### #025 — 2026-08-24T13:00:00-04:00
 
 **Feature (product-facing)**: inviting a manager or authorized user (SDD
