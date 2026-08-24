@@ -741,6 +741,42 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #031 — 2026-08-24T22:30:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: #030's `terraform apply`
+(the second, real apply, after the Elastic-IP-only first apply and a
+confirmed-resolving DNS record) failed immediately with:
+`"ingress.0.description" doesn't comply with restrictions
+("^[0-9A-Za-z_ .:/()#,@\[\]+=&;{}!$*-]*$"): "App (real HTTPS via Let's
+Encrypt)"` (and the same for the port-80 rule's description). Confirmed
+against a real deploy: an `aws_security_group` ingress/egress rule's own
+`description` field is validated against a stricter character set than the
+security group's own top-level `description` (which allows apostrophes
+fine, per the same plan output showing no error on it) -- ingress/egress
+rule descriptions do not allow apostrophes at all.
+
+Fix: reworded "Let's Encrypt" to "Lets Encrypt" in the two ingress rule
+descriptions this composition added in #030 (`infra/modules/ec2_host/
+main.tf`). Cosmetic only, no functional change. Checked the rest of this
+composition's Terraform string literals for the same risk (grep for `'`
+across `ec2_host/main.tf`, `lean/main.tf`, `modules/cognito/main.tf`) --
+every remaining apostrophe is inside a `#` comment, never reaching AWS, so
+this is the only fix needed.
+
+The plan output the user pasted alongside this error is otherwise
+reassuring: both Cognito resource changes showed as `~ update in-place`
+(not replacement), confirming the domain switch doesn't force-recreate the
+user pool or its client. Whether `aws_instance.this` itself will show as an
+in-place update or a replacement (expected either way per #030, since
+`user_data` genuinely changed) wasn't yet visible -- the plan aborted at the
+security group validation error before reaching that resource. Still
+unconfirmed at the time of this entry.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+against both compositions (real `terraform` binary, `-backend=false`), plus
+a manual grep sweep for any other apostrophe in an AWS-facing field value
+(not a comment). `npm test`/`lint`/`build` unaffected (no `src/` changes).
+
 ### #030 — 2026-08-24T22:00:00-04:00
 
 **Feature (deployment)**: the lean EC2 deployment now serves over a real
