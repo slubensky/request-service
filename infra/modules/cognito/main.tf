@@ -120,3 +120,15 @@ resource "aws_cognito_user_pool_domain" "this" {
   user_pool_id          = aws_cognito_user_pool.this.id
   managed_login_version = var.managed_login_version
 }
+
+# Managed login (managed_login_version = 2, required -- see its comment on
+# var.managed_login_version's usage above) needs branding/style to exist
+# before its pages serve anything; without it /login shows "Login pages
+# unavailable. Please contact an administrator." (confirmed against a real
+# deploy). Terraform can only manage this via aws_cognito_managed_login_branding,
+# added in AWS provider v6.12+ -- this repo is pinned to ~> 5.0 across all of
+# infra/, and bumping that major version is a separate decision with its own
+# migration risk, not bundled into this fix. Until/unless that happens, run
+# once per fresh pool, out of band (see infra/README.md):
+#   aws cognito-idp create-managed-login-branding --user-pool-id <id> \
+#     --client-id <id> --use-cognito-provided-values

@@ -39,14 +39,12 @@ module "cognito" {
 
   name_prefix   = var.project_name
   domain_prefix = var.cognito_domain_prefix
-  # 1 = classic Hosted UI. Version 2 ("Managed Login") requires branding/style
-  # to be explicitly saved once (console, or a separate
-  # aws_cognito_managed_login_branding resource) before its pages serve
-  # anything -- until then Cognito shows "Login pages unavailable. Please
-  # contact an administrator." at /login, confirmed against a real deploy.
-  # Classic Hosted UI has no such requirement, so it's the better fit for
-  # this throwaway test deployment.
-  managed_login_version = 1
+  # Must stay 2 ("Managed Login"): it's the only Hosted UI version that
+  # supports choice-based sign-in (the SMS OTP picker screen this app relies
+  # on) -- classic Hosted UI (1) only ever renders a username+password form.
+  # modules/cognito's aws_cognito_managed_login_branding resource is what
+  # actually makes version 2's pages serve (see its comment for why).
+  managed_login_version = 2
   callback_urls         = ["https://${aws_eip.app.public_ip}:${var.app_port}/auth/callback"]
   logout_urls           = ["https://${aws_eip.app.public_ip}:${var.app_port}/"]
   # WebAuthn/passkeys require a real domain, not a bare IP -- unusable in this

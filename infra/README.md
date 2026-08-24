@@ -48,6 +48,14 @@ Validation needs **no** variables. A real (human-gated) deploy requires:
 | `webauthn_relying_party_id`                     | Registrable domain passkeys bind to (e.g. `app.example.com`). |
 | `cognito_domain_prefix`                         | Managed-login (Hosted UI) domain prefix (globally unique).    |
 
+**Required one-time step, every fresh pool:** the same manual
+`create-managed-login-branding` step documented under "Lean test deployment"
+below applies here too — Terraform cannot yet create it (needs AWS provider
+v6.12+; this repo is pinned to `~> 5.0`), and without it `/login` shows
+"Login pages unavailable" instead of the sign-in page. Run once after apply,
+using this composition's own `cognito_user_pool_id` / `cognito_user_pool_client_id`
+outputs.
+
 Optional custom domain:
 
 | Variable                 | Description                                                           |
@@ -134,7 +142,24 @@ terraform apply \
 
 Wait a minute or two after apply for the instance's user-data to finish (installs
 Docker, generates the self-signed cert, clones this repo, builds the image, runs
-migrations, and starts the app). Then:
+migrations, and starts the app).
+
+**Required one-time step, every fresh pool:** Terraform creates the user pool
+domain but cannot yet create its managed-login branding (the
+`aws_cognito_managed_login_branding` resource needs AWS provider v6.12+; this
+repo is pinned to `~> 5.0`). Without it, `/login` shows "Login pages
+unavailable. Please contact an administrator." instead of the sign-in page —
+confirmed against a real deploy. Run once, out of band:
+
+```sh
+aws cognito-idp create-managed-login-branding \
+  --region us-east-1 \
+  --user-pool-id "$(terraform output -raw cognito_user_pool_id)" \
+  --client-id "$(terraform output -raw cognito_user_pool_client_id)" \
+  --use-cognito-provided-values
+```
+
+Then:
 
 ```sh
 terraform output app_url    # https://<elastic-ip>:3000

@@ -742,6 +742,46 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #023 — 2026-08-24T10:15:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: #022's fix was wrong. It
+switched the lean deployment to `managed_login_version = 1` (classic Hosted
+UI) to dodge the "Login pages unavailable" error, and that did make `/login`
+serve a page -- but the page it serves is a plain username+password form, not
+the choice-based SMS OTP picker this app depends on. Confirmed via AWS's own
+docs: classic Hosted UI never supports choice-based authentication
+(`allowed_first_auth_factors` with `SMS_OTP`/`WEB_AUTHN`) at all, regardless
+of how the user pool client is configured -- that UI is exclusively a
+Managed Login (`managed_login_version = 2`) feature. #022 traded one real
+problem (login pages don't serve) for a worse one (login pages serve the
+wrong flow entirely).
+
+Reverted `infra/lean/main.tf` to `managed_login_version = 2` and fixed the
+_actual_ root cause instead: version 2's pages don't serve until the pool's
+managed-login branding/style exists (confirmed above in #022's diagnosis, the
+one part of it that was correct). Terraform can only manage that via
+`aws_cognito_managed_login_branding`, added in AWS provider **v6.12+** --
+this repo pins `~> 5.0` across all of `infra/`, shared by every module
+(network, database, secrets, app_runner, dns), not just cognito. A major
+provider bump to unblock one resource is a separate decision with its own
+migration risk, so -- per explicit user choice among three options (document
+as a manual step / bump the provider to `~> 6.0` / leave it undocumented) --
+this is now a documented one-time manual step instead: run
+`aws cognito-idp create-managed-login-branding --use-cognito-provided-values`
+once per fresh pool (`infra/README.md`, both the lean and production
+sections). Added `cognito_user_pool_client_id` to `infra/lean/outputs.tf` (was
+missing; production already exposed both IDs) so the documented command is
+directly copy-pasteable from `terraform output`.
+
+Production (`infra/main.tf`) had the identical latent bug -- it also defaults
+to `managed_login_version = 2` with no branding resource -- and would have
+hit the same "Login pages unavailable" error on its first real apply; this
+fix (module comment + README step) covers both compositions, not just lean.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+against both compositions (real `terraform` binary, `-backend=false`).
+`npm test`/`lint`/`build` unaffected (no `src/` changes).
+
 ### #022 — 2026-08-24T09:30:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: with the container running

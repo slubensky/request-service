@@ -17,3 +17,8 @@ output "cognito_user_pool_id" {
   description = "Cognito user pool ID, for seeding a Company Admin directly if needed."
   value       = module.cognito.user_pool_id
 }
+
+output "cognito_user_pool_client_id" {
+  description = "Cognito app client ID, needed for the one-time create-managed-login-branding CLI step (see infra/README.md)."
+  value       = module.cognito.user_pool_client_id
+}
