@@ -127,6 +127,18 @@ resource "aws_instance" "this" {
   })
 
   tags = { Name = "${var.name_prefix}-host" }
+
+  # data.aws_ami.al2023 re-resolves "most recent" on every plan, and AWS
+  # publishes new AL2023 AMIs often enough (sometimes every few days) that a
+  # later plan/apply would otherwise see the AMI ID drift and force a full
+  # destroy-and-recreate of this instance -- wiping Postgres's data, which
+  # lives in a Docker volume on this instance's local disk, not anywhere
+  # durable. Confirmed against a real deploy. The AMI lookup still picks the
+  # latest AL2023 image the *first* time this instance is created; later plans
+  # just don't drift-replace it over a newer AMI release.
+  lifecycle {
+    ignore_changes = [ami]
+  }
 }
 
 data "aws_region" "current" {}
