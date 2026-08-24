@@ -32,6 +32,9 @@ services:
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       PUBLIC_BASE_URL: https://${PUBLIC_IP}:${APP_PORT}
+      # Real invite SMS via SNS (src/sms/sns-gateway.ts) -- credentials come from
+      # the instance role (infra/modules/ec2_host), never from this .env file.
+      APP_AWS_REGION: ${APP_AWS_REGION}
       COGNITO_DOMAIN: ${COGNITO_DOMAIN}
       COGNITO_ISSUER: ${COGNITO_ISSUER}
       COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}

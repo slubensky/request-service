@@ -742,6 +742,96 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #025 — 2026-08-24T13:00:00-04:00
+
+**Feature (product-facing)**: inviting a manager or authorized user (SDD
+§11.1, §11.4) now sends a real text message to the invited phone, instead of
+only writing a pending `SiteRole` row ("mocked delivery" per the original
+§3.3/§11.1 design). No secret token in the link -- the invite bridge already
+links a pending `SiteRole` to a Cognito identity purely by the invitee's own
+**verified** phone at sign-in (§3.3), so the SMS just needs to point them at
+`/auth/login`; Cognito's real SMS OTP challenge is the actual security gate,
+not anything in the link.
+
+- `src/sms/gateway.ts`: `SmsGateway` seam (mirrors `src/payments/gateway.ts`'s
+  `PaymentGateway`/`MockPaymentGateway` pattern) + `MockSmsGateway` (records
+  sends, always succeeds; used for tests and DEMO_MODE) + `buildInviteMessage`
+  (shared wording: `"<Site Name> invited you to Restroom Hero. Sign in at
+<base-url>/auth/login to get started."`).
+- `src/sms/sns-gateway.ts`: `SnsSmsGateway`, the real implementation, via
+  `@aws-sdk/client-sns` (new dependency) -- the same SNS mechanism Cognito's
+  own SMS OTP already sends through in this account/region. `send()` never
+  throws: any SDK/network failure is caught and reported as `{sent: false}`,
+  per explicit product decision -- a delivery failure must never block or roll
+  back the already-persisted invite, and must be visible to the inviter (not
+  silently swallowed) so they can follow up another way.
+- `src/admin/service.ts` (`inviteInitialManager`) / `src/manager/service.ts`
+  (`inviteSiteMember`): `InviteOutcome` now also carries `siteName` (one extra
+  selected column, no extra query) so the route layer can personalize the
+  message without a second lookup.
+- `src/admin/routes.ts` / `src/manager/routes.ts`: after a real (non-idempotent-
+  noop) invite, send the SMS and branch the response text: "Invitation sent."
+  on success, "Invite created, but the text message failed to send. Let them
+  know another way." on failure -- gated on `!isDemoMode()` (DEMO_MODE keeps
+  using the existing accept-code loop instead, unchanged, and never attempts a
+  real AWS call). No new rate limit was added on top of the existing per-user
+  invite budget (`manager/routes.ts`) -- explicit product decision; that
+  limiter's own comment about being sized loose "since no SMS cost gates it
+  yet" is now slightly stale (SMS cost does exist now) but was left as-is
+  rather than tightened speculatively.
+- `src/server/base-url.ts`: extracted from `src/admin/routes.ts`'s
+  previously-private `scanBaseUrl`/`isEncryptedConnection` (renamed
+  `publicBaseUrl`) since `manager/routes.ts` now needs the same base-URL
+  derivation for its own invite links; QR issuance (`admin/routes.ts`) updated
+  to the shared import, unchanged in behavior.
+- `src/server/app.ts`: real-vs-mock gateway selection was **not** put in
+  `buildRouter` where it was first written -- that would have made every
+  existing HTTP-level route test (`admin-console-routes.test.ts`,
+  `manager-console-routes.test.ts`, `csrf-enforcement.test.ts`), none of which
+  set `DEMO_MODE`, attempt a real AWS SNS call on every invite POST through
+  `createHttpServer(runtime)`, breaking their existing assertions and adding
+  real network I/O to the test suite. Caught before landing. Fixed by
+  threading `smsGateway` as an explicit optional parameter through
+  `createAppForRuntime`/`createHttpServer`, defaulting to `MockSmsGateway`
+  (never real) exactly like the existing `runtime` override already works for
+  tests; only `createApp()` (the environment-sourced, zero-arg production
+  entry point) makes the `isDemoMode()`-based real-vs-mock choice.
+- Infra, both compositions: `modules/ec2_host` gained its **first** IAM role +
+  instance profile (none existed before), granting `sns:Publish`; also added
+  `metadata_options { http_tokens = "required", http_put_response_hop_limit =
+2 }` on the instance -- the default hop limit of 1 only reaches IMDS from the
+  instance's own network namespace, not from inside the Docker container one
+  bridge-network hop further out, which would have made the AWS SDK's
+  instance-role credential lookup silently fail for every SMS send.
+  `modules/app_runner`'s existing `instance` role gained the same
+  `sns:Publish` policy. Region is read from `APP_AWS_REGION` (not `AWS_REGION`,
+  to stay unambiguous against any AWS-reserved/platform-injected variable of
+  that bare name) -- production's App Runner composition already had this
+  wired into `runtime_environment_variables` before this change, unused until
+  now; the lean deployment's `user_data.sh.tpl`/`docker-compose.yml` gained it
+  fresh, sourced from a new `data "aws_region" "current"`.
+- `infra/README.md`: new "Invite SMS delivery" section cross-referencing the
+  existing SNS sandbox/origination-identity prerequisites (#024) -- they apply
+  here too, since this is the same underlying SNS mechanism.
+
+Not yet re-confirmed end-to-end against a fresh `terraform apply` (the IAM/
+IMDS/region changes need a real instance to prove the credential path actually
+resolves inside the container) at the time of this entry.
+
+Validated with `npx tsc --noEmit` (only 3 pre-existing, unrelated errors --
+confirmed via `git stash` against the same baseline), `npm run lint`,
+`npm test` (full suite, 208 pre-existing tests + this feature's new ones, all
+passing, no real network calls), `npm run test:coverage` (83.29% lines /
+82.42% branches / 91.50% functions -- comfortably above the 73/81/77 floor,
+no regression), and `terraform fmt -check -recursive` / `terraform validate`
+against both compositions (real `terraform` binary, `-backend=false`).
+`SnsSmsGateway` itself is deliberately not unit-tested against a real/mocked
+AWS SDK call (this sandbox has proxy-injected placeholder AWS credentials
+that would behave inconsistently between here and CI, risking flakiness) --
+mirrors `payments/gateway.ts`'s existing philosophy of only ever testing the
+mock implementation; correctness of the thin AWS-wrapper class rests on
+review plus the user's own real-world SMS deliveries earlier this session.
+
 ### #024 — 2026-08-24T11:00:00-04:00
 
 **Docs (deployment, no product-facing change)**: with sign-in reaching the

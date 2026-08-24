@@ -15,11 +15,14 @@ import { registerDemoRoutes, isDemoAcceptSubmission } from '../demo/routes.js';
 import { passesCsrf } from '../auth/guard.js';
 import type { AuthRuntime } from '../auth/config.js';
 import { MockPaymentGateway } from '../payments/gateway.js';
+import { MockSmsGateway, type SmsGateway } from '../sms/gateway.js';
+import { SnsSmsGateway } from '../sms/sns-gateway.js';
+import { isDemoMode } from '../demo/config.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(currentDir, '../../public');
 
-function buildRouter(runtime: AuthRuntime): Router {
+function buildRouter(runtime: AuthRuntime, smsGateway: SmsGateway): Router {
   const router = new Router();
 
   router.get('/healthz', ({ res }) => {
@@ -37,8 +40,8 @@ function buildRouter(runtime: AuthRuntime): Router {
   // cancel observes the same in-process gateway an authorize went through
   // (SDD §9.3) -- not Stripe; see src/payments/gateway.ts.
   const paymentGateway = new MockPaymentGateway();
-  registerAdminRoutes(router, runtime, paymentGateway);
-  registerManagerRoutes(router, runtime, paymentGateway);
+  registerAdminRoutes(router, runtime, paymentGateway, smsGateway);
+  registerManagerRoutes(router, runtime, paymentGateway, undefined, smsGateway);
   registerPublicRoutes(router, runtime, undefined, paymentGateway);
   // Demo invite-code acceptance (SDD §6.3): registers nothing unless DEMO_MODE is on.
   registerDemoRoutes(router, runtime);
@@ -60,11 +63,18 @@ function parseUrl(req: IncomingMessage): URL {
  * can drive the *real* HTTP path -- including the CSRF gate below, which lives
  * only in this closure -- against a PGlite-backed runtime, the same way
  * `createApp()` drives it against the environment-sourced one.
+ *
+ * `smsGateway` defaults to a fresh `MockSmsGateway` -- same as the payment
+ * gateway, real delivery is never the default here, so a test driving this
+ * path (all of them, PGlite-backed) can never trigger a real AWS call
+ * regardless of `DEMO_MODE`. `createApp()` below is the only caller that
+ * opts into real delivery.
  */
 export function createAppForRuntime(
   runtime: AuthRuntime,
+  smsGateway: SmsGateway = new MockSmsGateway(),
 ): (req: IncomingMessage, res: ServerResponse) => void {
-  const router = buildRouter(runtime);
+  const router = buildRouter(runtime, smsGateway);
 
   return (req, res) => {
     const method = req.method ?? 'GET';
@@ -110,9 +120,16 @@ export function createAppForRuntime(
   };
 }
 
-/** Builds the request listener from the environment-sourced runtime (production entry point). */
+/**
+ * Builds the request listener from the environment-sourced runtime (production entry
+ * point). The one place real SMS delivery (src/sms/sns-gateway.ts) is selected -- every
+ * real deployment (SDD §6.3's accept-code loop is DEMO_MODE-only, so this is the
+ * production/lean-deployment path); MockSmsGateway under DEMO_MODE, so local dev never
+ * attempts a real AWS call.
+ */
 export function createApp(): (req: IncomingMessage, res: ServerResponse) => void {
-  return createAppForRuntime(getAuthRuntime());
+  const smsGateway: SmsGateway = isDemoMode() ? new MockSmsGateway() : new SnsSmsGateway();
+  return createAppForRuntime(getAuthRuntime(), smsGateway);
 }
 
 /**
@@ -122,9 +139,17 @@ export function createApp(): (req: IncomingMessage, res: ServerResponse) => void
  * the reverse proxy, per SDD §13) use. `src/index.ts` requires these locally: cookies are
  * unconditionally `Secure` (SDD §12), which a browser without a "localhost is a secure
  * context" exception silently drops over plain HTTP (SDD changelog #014).
+ *
+ * `smsGateway` is forwarded to `createAppForRuntime` only when a `runtime` override is also
+ * given (test path); the environment-sourced production path (`createApp()`) always makes
+ * its own real-vs-mock choice and ignores this parameter, so a test can never accidentally
+ * flip it.
  */
-export function createHttpServer(runtime?: AuthRuntime): Server | HttpsServer {
-  const handler = runtime ? createAppForRuntime(runtime) : createApp();
+export function createHttpServer(
+  runtime?: AuthRuntime,
+  smsGateway?: SmsGateway,
+): Server | HttpsServer {
+  const handler = runtime ? createAppForRuntime(runtime, smsGateway) : createApp();
   const certFile = process.env.TLS_CERT_FILE;
   const keyFile = process.env.TLS_KEY_FILE;
   if (certFile && keyFile) {

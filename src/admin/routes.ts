@@ -20,7 +20,7 @@ import { authorizeOrReject } from '../auth/gate.js';
 import { parseCookies } from '../auth/cookies.js';
 import { SESSION_COOKIE } from '../auth/routes.js';
 import { csrfTokenForSession } from '../auth/csrf.js';
-import { getEnv } from '../config/env.js';
+import { publicBaseUrl } from '../server/base-url.js';
 import { readFormBody, BodyTooLargeError } from '../server/body.js';
 import { sendText } from '../server/respond.js';
 import { requireField, parsePhone, type ParseResult } from '../server/validation.js';
@@ -54,6 +54,7 @@ import {
   PaymentAuthorizationNotFoundError,
 } from '../payments/service.js';
 import { MockPaymentGateway, type PaymentGateway } from '../payments/gateway.js';
+import { MockSmsGateway, buildInviteMessage, type SmsGateway } from '../sms/gateway.js';
 
 /** Parses and validates the create-site form. Nothing here is trusted unvalidated. */
 function parseCreateSiteInput(fields: Record<string, string>): ParseResult<CreateSiteInput> {
@@ -82,25 +83,6 @@ function parseCreateSiteInput(fields: Record<string, string>): ParseResult<Creat
       fixedPriceCents,
     },
   };
-}
-
-/** True when this request arrived over a real TLS connection (an `https.Server`'s socket is a
- * `tls.TLSSocket`, which carries `.encrypted`; a plain `http.Server`'s socket does not). */
-function isEncryptedConnection(req: RouteContext['req']): boolean {
-  return Boolean((req.socket as { encrypted?: boolean }).encrypted);
-}
-
-/** Base URL a printed QR should point at: an explicit env override, else the request host with
- * the scheme the request actually arrived over -- never hardcoded, so it matches whichever of
- * plain HTTP or HTTPS this process is actually serving (SDD §5, changelog #015). */
-function scanBaseUrl({ req }: RouteContext): string {
-  const configured = getEnv('PUBLIC_BASE_URL');
-  if (configured) {
-    return configured.replace(/\/+$/, '');
-  }
-  const host = req.headers.host ?? 'localhost';
-  const scheme = isEncryptedConnection(req) ? 'https' : 'http';
-  return `${scheme}://${host}`;
 }
 
 async function handleConsole(runtime: AuthRuntime, ctx: RouteContext): Promise<void> {
@@ -207,13 +189,17 @@ async function handleIssueQr(runtime: AuthRuntime, ctx: RouteContext): Promise<v
     }
     throw error;
   }
-  const scanUrl = `${scanBaseUrl(ctx)}/s/${issued.rawToken}`;
+  const scanUrl = `${publicBaseUrl(ctx)}/s/${issued.rawToken}`;
   const qrSvg = await renderQrSvg(scanUrl);
   ctx.res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   ctx.res.end(renderQrIssued(scanUrl, qrSvg));
 }
 
-async function handleInviteManager(runtime: AuthRuntime, ctx: RouteContext): Promise<void> {
+async function handleInviteManager(
+  runtime: AuthRuntime,
+  ctx: RouteContext,
+  smsGateway: SmsGateway,
+): Promise<void> {
   const siteId = ctx.params.siteId ?? '';
   const gate = await authorizeOrReject(runtime, ctx, {
     type: 'invite_initial_manager',
@@ -246,6 +232,22 @@ async function handleInviteManager(runtime: AuthRuntime, ctx: RouteContext): Pro
   // production where DEMO_MODE is off.
   if (isDemoMode()) {
     await issueDemoInviteCode(gate.db, outcome.role.id);
+  }
+  // Real SMS invite (no-op under DEMO_MODE, which uses the accept-code loop above
+  // instead): a send failure never blocks or rolls back the already-created invite
+  // (src/sms/gateway.ts) -- it's surfaced in the response so the admin can follow up
+  // another way.
+  if (!isDemoMode()) {
+    const message = buildInviteMessage(outcome.siteName, publicBaseUrl(ctx));
+    const result = await smsGateway.send(phone.value, message);
+    if (!result.sent) {
+      sendText(
+        ctx.res,
+        200,
+        'Invite created, but the text message failed to send. Let them know another way.',
+      );
+      return;
+    }
   }
   sendText(ctx.res, 200, 'Invitation sent.');
 }
@@ -398,12 +400,15 @@ function withBodyLimit(
  * Registers the Company-Admin console, onboarding, and payment
  * capture/cancel endpoints (SDD §11.6). The payment gateway is injectable so
  * tests can share one instance with the public authorize route (SDD §9.3);
- * production uses a fresh MockPaymentGateway.
+ * production uses a fresh MockPaymentGateway. The SMS gateway is injectable
+ * the same way (src/sms/gateway.ts); production wires a real SnsSmsGateway
+ * (see src/server/app.ts), tests default to a fresh MockSmsGateway.
  */
 export function registerAdminRoutes(
   router: Router,
   runtime: AuthRuntime,
   gateway: PaymentGateway = new MockPaymentGateway(),
+  smsGateway: SmsGateway = new MockSmsGateway(),
 ): void {
   router.get('/admin', (ctx) => handleConsole(runtime, ctx));
   router.post('/admin/sites', (ctx) => withBodyLimit(handleCreateSite)(runtime, ctx));
@@ -414,7 +419,7 @@ export function registerAdminRoutes(
     withBodyLimit(handleIssueQr)(runtime, ctx),
   );
   router.post('/admin/sites/:siteId/managers', (ctx) =>
-    withBodyLimit(handleInviteManager)(runtime, ctx),
+    withBodyLimit((r, c) => handleInviteManager(r, c, smsGateway))(runtime, ctx),
   );
   router.post('/admin/sites/:siteId/roles/:roleId/revoke', (ctx) =>
     withBodyLimit(handleRevokeRole)(runtime, ctx),

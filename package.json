@@ -36,6 +36,7 @@
     "typescript-eslint": "^8.0.0"
   },
   "dependencies": {
+    "@aws-sdk/client-sns": "^3.1116.0",
     "drizzle-orm": "^0.44.7",
     "jose": "^5.10.0",
     "pg": "^8.23.0",

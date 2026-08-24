@@ -91,7 +91,11 @@ export async function inviteSiteMember(
   invitedPhone: string,
   maxAuthorizationCents: number | null,
 ): Promise<InviteOutcome> {
-  const [site] = await db.select({ id: sites.id }).from(sites).where(eq(sites.id, siteId)).limit(1);
+  const [site] = await db
+    .select({ id: sites.id, name: sites.name })
+    .from(sites)
+    .where(eq(sites.id, siteId))
+    .limit(1);
   if (!site) {
     throw new SiteNotFoundError();
   }
@@ -108,7 +112,7 @@ export async function inviteSiteMember(
     )
     .limit(1);
   if (existing) {
-    return { created: false, role: existing };
+    return { created: false, role: existing, siteName: site.name };
   }
 
   const [row] = await db
@@ -124,7 +128,7 @@ export async function inviteSiteMember(
   if (!row) {
     throw new Error('Failed to create site member invite');
   }
-  return { created: true, role: row };
+  return { created: true, role: row, siteName: site.name };
 }
 
 /** Loads a SiteRole scoped to its site and requires it to be an authorized user -- the shared

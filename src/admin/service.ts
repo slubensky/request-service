@@ -109,11 +109,13 @@ export async function issueQrToken(
 
 /** Outcome of an invite: `created` distinguishes a fresh invite from an idempotent
  * "already a member" no-op, so the console can show a distinct message (SDD §11.1, §11.4).
- * Defined here (the base service module) so `manager/service.ts` can share it without a
- * circular import. */
+ * `siteName` lets the caller personalize the invite SMS (src/sms/gateway.ts) without a
+ * second query. Defined here (the base service module) so `manager/service.ts` can share
+ * it without a circular import. */
 export interface InviteOutcome {
   created: boolean;
   role: SiteRoleRow;
+  siteName: string;
 }
 
 /**
@@ -132,7 +134,11 @@ export async function inviteInitialManager(
   siteId: string,
   invitedPhone: string,
 ): Promise<InviteOutcome> {
-  const [site] = await db.select({ id: sites.id }).from(sites).where(eq(sites.id, siteId)).limit(1);
+  const [site] = await db
+    .select({ id: sites.id, name: sites.name })
+    .from(sites)
+    .where(eq(sites.id, siteId))
+    .limit(1);
   if (!site) {
     throw new SiteNotFoundError();
   }
@@ -149,7 +155,7 @@ export async function inviteInitialManager(
     )
     .limit(1);
   if (existing) {
-    return { created: false, role: existing };
+    return { created: false, role: existing, siteName: site.name };
   }
 
   const [row] = await db
@@ -165,7 +171,7 @@ export async function inviteInitialManager(
   if (!row) {
     throw new Error('Failed to create manager invite');
   }
-  return { created: true, role: row };
+  return { created: true, role: row, siteName: site.name };
 }
 
 export interface SiteWithBathrooms {

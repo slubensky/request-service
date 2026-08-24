@@ -21,6 +21,7 @@ import { authorizeOrReject } from '../auth/gate.js';
 import { parseCookies } from '../auth/cookies.js';
 import { SESSION_COOKIE } from '../auth/routes.js';
 import { csrfTokenForSession } from '../auth/csrf.js';
+import { publicBaseUrl } from '../server/base-url.js';
 import { readFormBody, BodyTooLargeError } from '../server/body.js';
 import { sendText } from '../server/respond.js';
 import { requireField, parsePhone, type ParseResult } from '../server/validation.js';
@@ -49,6 +50,7 @@ import {
   type PendingApprovalView,
 } from '../payments/approvals.js';
 import { MockPaymentGateway, type PaymentGateway } from '../payments/gateway.js';
+import { MockSmsGateway, buildInviteMessage, type SmsGateway } from '../sms/gateway.js';
 import type { AppDatabase } from '../db/client.js';
 
 // Per-user budget for invite creation: generous for genuine onboarding, low
@@ -136,6 +138,7 @@ function registerInviteHandler(
   router: Router,
   runtime: AuthRuntime,
   limiter: FixedWindowRateLimiter,
+  smsGateway: SmsGateway,
 ): void {
   router.post('/manager/sites/:siteId/invites', async (ctx) => {
     const siteId = ctx.params.siteId ?? '';
@@ -202,6 +205,22 @@ function registerInviteHandler(
     // display it; a no-op in production where DEMO_MODE is off.
     if (isDemoMode()) {
       await issueDemoInviteCode(gate.db, outcome.role.id);
+    }
+    // Real SMS invite (no-op under DEMO_MODE, which uses the accept-code loop above
+    // instead): a send failure never blocks or rolls back the already-created invite
+    // (src/sms/gateway.ts) -- it's surfaced in the response so the manager can follow
+    // up another way.
+    if (!isDemoMode()) {
+      const message = buildInviteMessage(outcome.siteName, publicBaseUrl(ctx));
+      const result = await smsGateway.send(phone.value, message);
+      if (!result.sent) {
+        sendText(
+          ctx.res,
+          200,
+          'Invite created, but the text message failed to send. Let them know another way.',
+        );
+        return;
+      }
     }
     sendText(ctx.res, 200, 'Invitation sent.');
   });
@@ -350,9 +369,10 @@ export function registerManagerRoutes(
     limit: INVITE_LIMIT,
     windowMs: INVITE_WINDOW_MS,
   }),
+  smsGateway: SmsGateway = new MockSmsGateway(),
 ): void {
   router.get('/manager', (ctx) => handleConsole(runtime, ctx));
-  registerInviteHandler(router, runtime, limiter);
+  registerInviteHandler(router, runtime, limiter, smsGateway);
   registerMembershipHandlers(router, runtime);
   registerApproveHandler(router, runtime, gateway);
 }
