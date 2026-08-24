@@ -134,6 +134,15 @@ SMS OTP only. Also, since the app terminates TLS itself with a self-signed
 certificate (there is no real domain to get a trusted cert for), your browser
 will show a one-time security warning the first time you visit — click through it.
 
+**Test with a real mobile carrier number, not Google Voice** (confirmed against a
+real deploy): this app's own invite SMS (a plain informational text) delivers to
+a Google Voice number fine, but Cognito's own sign-in OTP does not -- many
+providers, AWS included, deliberately restrict OTP/verification-code delivery to
+VoIP numbers like Google Voice as an anti-fraud policy, since they can't be tied
+to verified phone-ownership history the way a carrier SIM can. This fails the
+same way for any Cognito deployment, not just this one -- there is no Terraform/
+Cognito config that fixes it.
+
 ### Prerequisites
 
 - **Check SNS SMS sandbox status first**: `aws sns get-sms-sandbox-account-status

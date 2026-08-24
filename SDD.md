@@ -742,6 +742,33 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #027 — 2026-08-24T19:00:00-04:00
+
+**Docs (deployment, no product-facing change)**: with the invite SMS (#025)
+and the AMI-drift fix (#026) both confirmed working, the user hit one more
+real-deploy gotcha: Cognito's sign-in OTP never arrived at a Google Voice
+number, while this app's own invite SMS (a plain informational text, sent
+moments earlier to the same number) delivered fine. Isolated to the number,
+not a regression: a real mobile carrier number worked immediately.
+
+Confirmed via external reports, not just inference: many providers,
+including AWS, deliberately restrict OTP/verification-code delivery to VoIP
+numbers like Google Voice as an anti-fraud policy -- they can't be tied to a
+verified phone-ownership history the way a carrier SIM can (Amazon is one
+concretely-named example of a service that outright blocks Google Voice for
+this reason). This is not a bug in this app's Terraform/Cognito config; it
+fails the same way for any Cognito deployment sending to a Google Voice
+number.
+
+Added a "test with a real mobile carrier number" note to
+`infra/README.md`'s lean-deployment prerequisites, alongside the existing
+sandbox/origination-identity caveats, so the next person testing this
+doesn't lose time attributing it to a config problem.
+
+No `terraform`/`src/` changes -- documentation only. `npm run lint` run
+(prettier covers `infra/README.md` and `SDD.md`); `npm test`/`build`
+unaffected.
+
 ### #026 — 2026-08-24T18:30:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: the user reported the lean
