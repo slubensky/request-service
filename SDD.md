@@ -741,6 +741,58 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #032 — 2026-08-24T23:00:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: with #031's apostrophe fix
+in place, the user's next real `terraform apply` (#030's domain/SSL change)
+hung for 10+ minutes on `module.ec2_host.aws_security_group.this: Still
+destroying...`, never completing. Confirmed against a real deploy:
+`aws ec2 describe-instances` showed the OLD instance still `running` the
+entire time -- it was never being replaced, so its network interface never
+released the security group AWS was refusing to let Terraform delete
+("DependencyViolation," retried silently by the provider rather than
+surfaced). The plan summary (`1 to add, 3 to change, 1 to destroy`) confirmed
+only the security group was queued for replacement; the instance was merely
+one of the 3 in-place changes.
+
+Root cause, confirmed via research rather than assumed (this repo has no
+record of ever setting it, and every prior changelog entry describing
+`user_data` changes in this file -- #017, #021 through #030 -- assumed a
+`user_data` change always forces a full instance replacement): the AWS
+provider's actual default, without `user_data_replace_on_change = true` set
+on `aws_instance`, is to treat a `user_data` change as an in-place update that
+merely **stops and starts** the existing instance -- not a replacement. Worse,
+even that stop/start would never have actually run the new Certbot/domain
+setup: cloud-init only executes first-boot user-data once per instance ID, so
+restarting the same instance does not re-trigger it. Every prior "this forces
+replacement" claim in this file's history (going back to #017, before this
+session's Certbot work even existed) was accurate only by accident, because
+no change since the instance's creation had touched `user_data` without also
+touching something else that independently forced replacement (e.g. the AMI,
+before #026's `ignore_changes` fix) -- until this apply, which changed only
+`user_data` content (domain name, Certbot script) with nothing else forcing
+replacement, exposing the gap for the first time.
+
+Fix: `user_data_replace_on_change = true` on `aws_instance.this`
+(`infra/modules/ec2_host/main.tf`). This also resolves the immediate deadlock
+as a side effect, not just the underlying gap: once the instance is correctly
+queued for replacement too, Terraform's dependency graph destroys it (which
+depends on the security group) before destroying the security group itself,
+instead of leaving the still-running old instance holding the security
+group's network interface open indefinitely.
+
+The user was advised to interrupt the hung `apply` with Ctrl-C (Terraform
+handles this gracefully -- finishes its current state write, then stops
+cleanly) rather than let it continue retrying indefinitely, since the
+dependency-ordering problem this exposed could not have resolved on its own
+no matter how long it kept retrying.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+against both compositions (real `terraform` binary, `-backend=false`). Not
+yet confirmed end-to-end against a fresh `terraform plan`/`apply` showing the
+corrected replacement/destroy-ordering behavior at the time of this entry.
+`npm test`/`lint`/`build` unaffected (no `src/` changes).
+
 ### #031 — 2026-08-24T22:30:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: #030's `terraform apply`
