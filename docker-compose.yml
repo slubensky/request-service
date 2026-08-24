@@ -21,17 +21,22 @@ services:
     depends_on:
       - db
     ports:
-      - '${APP_PORT}:${APP_PORT}'
+      # Host 443 -> container ${APP_PORT}: the app itself still just listens
+      # on its usual internal port; Docker does the privileged-port mapping,
+      # not the Node process, so no container-level privilege change is
+      # needed. Gives a clean https://domain URL with no :port suffix.
+      - '443:${APP_PORT}'
     environment:
       DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/request_service
       SESSION_SECRET: ${SESSION_SECRET}
       PORT: ${APP_PORT}
-      # Self-signed -- there is no real domain in this configuration (a bare
-      # Elastic IP), so the app terminates TLS itself instead of a reverse
-      # proxy. See src/index.ts's fail-closed dev/TLS check.
+      # A real Let's Encrypt certificate now (infra/modules/ec2_host's
+      # user-data runs Certbot) -- no more self-signed/browser-warning cert.
+      # Still terminated by the app itself, not a reverse proxy. See
+      # src/index.ts's fail-closed dev/TLS check.
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
-      PUBLIC_BASE_URL: https://${PUBLIC_IP}:${APP_PORT}
+      PUBLIC_BASE_URL: https://${DOMAIN_NAME}
       # Real invite SMS via SNS (src/sms/sns-gateway.ts) -- credentials come from
       # the instance role (infra/modules/ec2_host), never from this .env file.
       APP_AWS_REGION: ${APP_AWS_REGION}
@@ -39,8 +44,8 @@ services:
       COGNITO_ISSUER: ${COGNITO_ISSUER}
       COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}
       COGNITO_CLIENT_SECRET: ${COGNITO_CLIENT_SECRET}
-      COGNITO_REDIRECT_URI: https://${PUBLIC_IP}:${APP_PORT}/auth/callback
-      COGNITO_LOGOUT_REDIRECT_URI: https://${PUBLIC_IP}:${APP_PORT}/
+      COGNITO_REDIRECT_URI: https://${DOMAIN_NAME}/auth/callback
+      COGNITO_LOGOUT_REDIRECT_URI: https://${DOMAIN_NAME}/
     volumes:
       - ./certs:/certs:ro
     # Migrations run against the sibling `db` service on every start

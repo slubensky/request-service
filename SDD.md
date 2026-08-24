@@ -741,6 +741,89 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #030 — 2026-08-24T22:00:00-04:00
+
+**Feature (deployment)**: the lean EC2 deployment now serves over a real
+domain with a real, browser-trusted TLS certificate (Let's Encrypt via
+Certbot), instead of a bare Elastic IP with a self-signed cert the browser
+warns about on every visit. As a direct consequence, WebAuthn/passkey
+enrollment -- previously an explicitly documented limitation of this
+deployment, since WebAuthn requires a real registrable domain and can't work
+against a bare IP -- now works here too, not just SMS OTP.
+
+- New required variable `domain_name` (`infra/lean/variables.tf`): the real
+  domain/subdomain the user points at this deployment's Elastic IP. DNS is
+  at GoDaddy for this user's domain -- not managed by Terraform (no GoDaddy
+  provider added for one `A` record); documented as a manual step with an
+  explicit two-apply sequencing (`-target=aws_eip.app` first to get a stable
+  IP before DNS can be pointed at it, confirm resolution with `dig`, then
+  apply everything else) since Let's Encrypt's HTTP-01 challenge at first
+  boot needs the domain to already resolve there.
+- `infra/lean/main.tf`: `relying_party_id` switched from the `"localhost"`
+  placeholder to `var.domain_name`; `callback_urls`/`logout_urls` switched
+  from the Elastic IP to the domain.
+- `infra/modules/ec2_host/main.tf`: security group now opens 443 (was the
+  app's own port, previously 3000) instead of the raw app port, plus 80
+  (Let's Encrypt's HTTP-01 challenge -- nothing else ever listens there,
+  safe to leave open indefinitely for renewals too). New `domain_name`
+  variable threaded into `user_data.sh.tpl`. Removed the now-unused
+  `public_ip` module variable entirely (nothing reads it any more; every
+  URL uses `domain_name` instead) rather than leave it as dead-but-declared.
+- `infra/modules/ec2_host/user_data.sh.tpl`: replaced the self-signed
+  `openssl req` cert generation with Certbot, installed via the AWS-
+  documented venv+pip method (AL2023 has no `dnf` package for it) --
+  confirmed via WebSearch before implementing, not guessed, given this
+  session's repeated cost of guessing at AWS/AL2023 specifics wrong the
+  first time. `certbot certonly --standalone -d "${domain_name}"` with
+  `--deploy-hook` pointed at a small script that copies the fresh cert
+  into `/opt/app/certs/` (where docker-compose's bind mount expects it) and
+  restarts just the app container -- Certbot persists a `--deploy-hook`
+  given at issuance time into its renewal config, so it also fires
+  automatically on every future renewal with no repetition needed in the
+  cron job. A twice-daily `certbot renew` cron entry follows Certbot's own
+  documented safe cadence (it only actually renews within ~30 days of
+  expiry).
+- `docker-compose.yml`: host port changed from `${APP_PORT}:${APP_PORT}` to
+  `443:${APP_PORT}` -- the container still just listens on its usual
+  internal port; only Docker's host-side port mapping changed, no
+  container-level privileged-port handling needed. Every URL
+  (`PUBLIC_BASE_URL`, `COGNITO_REDIRECT_URI`, `COGNITO_LOGOUT_REDIRECT_URI`)
+  switched from `https://${PUBLIC_IP}:${APP_PORT}` to
+  `https://${DOMAIN_NAME}` -- no more `:3000` in the URL a user actually
+  visits.
+- `infra/lean/outputs.tf`: `app_url` now `https://${var.domain_name}` (no
+  port suffix); `public_ip`'s description updated to describe its new,
+  narrower purpose (pointing DNS at it before applying) now that nothing
+  else depends on it.
+- `infra/README.md`: rewrote the "Lean test deployment" section's
+  Prerequisites/Deploy/visit instructions for the new domain+Certbot flow,
+  including the two-apply DNS-sequencing requirement and a `dig` check
+  before the second apply; dropped the "known limitation: WebAuthn doesn't
+  work" note since it's no longer true.
+
+Every template-interpolation and shell-syntax detail was verified rather
+than assumed, given this same file's history of exactly this class of bug
+during its original authoring (#017) -- a literal `${...}` inside a comment
+being misparsed as Terraform interpolation, caught and fixed before that
+entry was ever committed, so it left no changelog entry of its own to cite
+by number: rendered `user_data.sh.tpl` with
+`templatefile()` directly (an isolated scratch Terraform config, dummy
+values, real `terraform apply` to force output evaluation) and confirmed
+every `${...}` resolved to the expected literal value, including inside the
+nested single-quoted heredoc for the deploy-hook script; then `bash -n`
+syntax-checked both the full rendered script and the extracted embedded
+hook script independently. Not yet confirmed end-to-end against a real AWS
+apply + DNS + a live Let's Encrypt issuance at the time of this entry --
+that first real apply will also force-replace the current instance (`ami`
+drift is ignored per #026, but `user_data` genuinely changed here), wiping
+the database once more; the user will need to re-promote their account to
+company_admin afterward, same as every prior instance replacement this
+session.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+against both compositions (real `terraform` binary, `-backend=false`).
+`npm test`/`lint`/`build` unaffected (no `src/` changes).
+
 ### #029 — 2026-08-24T21:00:00-04:00
 
 **Feature (product-facing)**: a bathroom may now have any number of

@@ -45,12 +45,11 @@ module "cognito" {
   # modules/cognito's aws_cognito_managed_login_branding resource is what
   # actually makes version 2's pages serve (see its comment for why).
   managed_login_version = 2
-  callback_urls         = ["https://${aws_eip.app.public_ip}:${var.app_port}/auth/callback"]
-  logout_urls           = ["https://${aws_eip.app.public_ip}:${var.app_port}/"]
-  # WebAuthn/passkeys require a real domain, not a bare IP -- unusable in this
-  # configuration by design. This deployment tests SMS OTP only; the value
-  # here is a harmless placeholder.
-  relying_party_id  = "localhost"
+  callback_urls         = ["https://${var.domain_name}/auth/callback"]
+  logout_urls           = ["https://${var.domain_name}/"]
+  # A real domain (not a bare IP) now backs this deployment, so WebAuthn/
+  # passkey enrollment actually works here too, not just SMS OTP.
+  relying_party_id  = var.domain_name
   user_verification = "preferred"
   sms_external_id   = "${var.project_name}-cognito-sms"
 }
@@ -63,11 +62,11 @@ module "ec2_host" {
   key_name         = var.key_name
   allowed_ssh_cidr = var.allowed_ssh_cidr
   app_port         = var.app_port
+  domain_name      = var.domain_name
   repo_url         = var.repo_url
   repo_ref         = var.repo_ref
 
   eip_allocation_id = aws_eip.app.id
-  public_ip         = aws_eip.app.public_ip
 
   db_password    = random_password.db.result
   session_secret = random_id.session_secret.hex

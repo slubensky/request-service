@@ -20,9 +20,14 @@ variable "allowed_ssh_cidr" {
 }
 
 variable "app_port" {
-  description = "Port the app listens on and that is opened to the internet."
+  description = "Port the app listens on inside the container. The internet-facing port is always 443 (mapped to this one)."
   type        = number
   default     = 3000
+}
+
+variable "domain_name" {
+  description = "Real domain/subdomain pointing at this instance's Elastic IP, used for the Let's Encrypt certificate, Cognito's relying party ID, and every callback/base URL."
+  type        = string
 }
 
 variable "repo_url" {
@@ -37,11 +42,6 @@ variable "repo_ref" {
 
 variable "eip_allocation_id" {
   description = "Allocation ID of a pre-allocated Elastic IP to associate with this instance."
-  type        = string
-}
-
-variable "public_ip" {
-  description = "The Elastic IP's address -- known before instance creation, used to bake the self-signed cert's CN/SAN and the app's own callback URLs into user-data."
   type        = string
 }
 

@@ -1,10 +1,10 @@
 output "app_url" {
-  description = "Visit this, click through the self-signed-cert warning once, and sign in."
-  value       = "https://${aws_eip.app.public_ip}:${var.app_port}"
+  description = "Visit this and sign in -- a real, trusted Let's Encrypt certificate, no browser warning."
+  value       = "https://${var.domain_name}"
 }
 
 output "public_ip" {
-  description = "The instance's Elastic IP."
+  description = "The instance's Elastic IP -- point domain_name's DNS A record here before applying."
   value       = aws_eip.app.public_ip
 }
 
