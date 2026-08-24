@@ -65,7 +65,7 @@ resource "aws_iam_instance_profile" "this" {
 
 resource "aws_security_group" "this" {
   name_prefix = "${var.name_prefix}-"
-  description = "Lean test host: SSH from one IP, HTTPS from anywhere, HTTP for Let's Encrypt."
+  description = "Lean test host: SSH from one IP, HTTPS from anywhere, HTTP for Lets Encrypt."
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -77,7 +77,7 @@ resource "aws_security_group" "this" {
   }
 
   ingress {
-    description = "App (real HTTPS via Let's Encrypt)"
+    description = "App (real HTTPS via Lets Encrypt)"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -87,7 +87,7 @@ resource "aws_security_group" "this" {
   ingress {
     # Nothing else ever listens on 80 -- only Certbot, transiently, for the
     # HTTP-01 domain-ownership challenge (initial issuance and each renewal).
-    description = "Let's Encrypt HTTP-01 challenge"
+    description = "Lets Encrypt HTTP-01 challenge"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
