@@ -1,7 +1,7 @@
 /**
  * `isUniqueViolation` (src/db/access.ts) is the shared detector behind every
  * "conditional write + defensive catch" idiom in this codebase (the §3.3 invite
- * bridge's `activateWinner`, and the duplicate-active-request guard in
+ * bridge's `activateWinner`, and the one-saved-payment-method-per-site guard in
  * src/payments/service.ts, SDD §9.4) -- each promises a genuine Postgres unique
  * violation is caught and treated as a graceful no-op, never an unhandled 500.
  *

@@ -229,7 +229,7 @@ phone to one site). `bridgePendingSiteRoles` enforces this as follows:
   because the driver's raw error is not necessarily the object a caller catches (a
   wrapping query-error type may attach the original as `.cause`); this is the sole
   detector shared by every "conditional write + defensive catch" site in the codebase,
-  including the duplicate-active-request guard (§9.4).
+  including the one-saved-payment-method-per-site guard (§9.4).
 
 This is a resilience change only: the single-invite happy path (one pending invite per
 phone per site) is byte-for-byte unchanged in behavior — same row activated/linked, same
@@ -259,7 +259,7 @@ All entities are stored in PostgreSQL (Aurora Serverless v2) via Drizzle ORM. Pa
 - `CleaningRequest.price_version` anchors the price used at authorization time so later `Site.fixed_price_cents` changes cannot retroactively alter an in-flight or historical request.
 - `PaymentAuthorization` is 1:1 with `CleaningRequest` in the MVP (no partial charges, no multiple holds per request).
 - `SitePaymentMethod.site_id` is unique — at most one saved method per Site in this phase (§9.4). `created_by_user_id` is an audit reference only; it does not change who the method belongs to (the Site) or who may use it (any authorized Manager or authorized user at that Site, per §7).
-- At most one non-terminal (`authorizing`/`authorized`) `CleaningRequest` may exist per `bathroom_id` at a time, enforced by a partial unique index (§9.4).
+- A `bathroom_id` may have any number of simultaneous non-terminal (`authorizing`/`authorized`) `CleaningRequest` rows — no per-bathroom cap (removed by explicit product decision, §9.4, changelog #029).
 
 ## 5. QR generation & resolution
 
@@ -491,15 +491,14 @@ threading one through before a real gateway exists to consume it is deferred.
   `POST /s/:token/payment-method` itself carries no recency requirement — only _placing a
   hold_ is gated, matching the literal scope of the requirement and creating no
   money-movement bypass (adding a mock record moves no money by itself).
-- **Duplicate-active-request guard.** `createCleaningRequest` (`src/payments/service.ts`)
-  now rejects with `DuplicateActiveRequestError` (mapped to `409` by the route) if the
-  target bathroom already has a non-terminal (`authorizing`/`authorized`) `CleaningRequest`
-  — checked before any gateway call, per the "authorization/validation precedes side
-  effects" principle. A read-check-first plus a backstop partial unique index
-  (`cleaning_requests_bathroom_active_key` on `bathroom_id` `WHERE status IN
-('authorizing','authorized')`) closes the double-tap race the same way the existing §3.3
-  invite bridge closes its own concurrent-write race: a resulting Postgres unique-violation
-  is caught and mapped to the same clean error, never an unhandled `500`.
+- **No duplicate-active-request guard.** Phase 3 originally added one here: `createCleaningRequest`
+  rejected a second non-terminal `CleaningRequest` for the same bathroom (backstopped by a
+  partial unique index, `cleaning_requests_bathroom_active_key`). **Removed by explicit
+  product decision** (changelog #029) — a bathroom may now have any number of simultaneous
+  non-terminal requests, each its own independent `CleaningRequest`/`PaymentAuthorization`
+  pair, captured or canceled independently. `DuplicateActiveRequestError` no longer exists;
+  a concurrent double-tap now succeeds as two independent requests rather than one `200` and
+  one `409`.
 
 ## 10. Over-limit approval for authorized users
 
@@ -518,7 +517,7 @@ instead it is held for a manager's approval:
 - Only a **manager** for that site can grant the approval (`request:approve`). Granting it
   re-validates the binding (not expired; the site's current fixed price still equals the
   bound amount), then places the hold via the normal authorization path (§9.1 step 2, mock
-  gateway, duplicate-active guard) and marks the approval `used`. The site must already have
+  gateway) and marks the approval `used`. The site must already have
   a saved (mock) payment method (§9.4) — `409` otherwise. The scan-page step-up recency
   check (§6.4) is a control on the self-service scan-and-authorize path; it is not re-imposed
   on this deliberate console management action (like admin capture/cancel, which also carry
@@ -691,8 +690,8 @@ deny-by-default matrix (§7); nothing here is a new role.
   gate (§11.6, unchanged: session, token/price resolution, matrix check, all before any
   side effect), two new checks precede the gateway call: `409` if the site has no saved
   payment method yet, then `401` if `sessionAuthenticatedWithin(session, 300)` does not hold
-  (§6.4). On success, calls `createCleaningRequest` as before; a
-  `DuplicateActiveRequestError` (§9.4) is mapped to `409`, not a `500`.
+  (§6.4). On success, calls `createCleaningRequest` as before; no duplicate-active-request
+  mapping exists any more (§9.4, changelog #029).
 - `GET /auth/login` (amended) — accepts an optional `next` query parameter honored only
   against the `^/s/[A-Za-z0-9_-]+$` allow-list (§6.4); stored in a new short-lived HttpOnly
   `rs_oauth_return_to` cookie. `GET /auth/callback` (unchanged/shared across every auth
@@ -726,7 +725,7 @@ These decisions are locked pending final sign-off on the Blueprint (`art_RUHUe0P
 - **Deploy:** AWS via Terraform — App Runner (SSR), RDS/Aurora Serverless v2 PostgreSQL, Secrets Manager, ACM + Route 53, region `us-east-1`.
 - **Auth:** Amazon Cognito managed passwordless — SMS OTP + passkeys, via Cognito managed login (Hosted UI). Cognito owns authentication; the application server owns authorization (SiteRole).
 - **Identity vs. authority:** customer = no SiteRole; authorized_user/manager = manager-created SiteRole (pending until accepted, then authorized); Company Admin = platform-level `platform_role=company_admin`, provisioned internally/seeded (or granted by an existing Company Admin), never via self-service, QR, or Cognito login. No self-service elevation to any of these (§3).
-- **Payments:** Stripe manual-capture PaymentIntents with idempotency keys; capture/cancel is Company-Admin/internal-backend only; server-derived price (§8, §9). **Phase 2/3/6 implement this against a mocked `PaymentGateway` (§9.3) — no Stripe SDK, no live keys, no real card collection or money movement — with the real Stripe integration tracked as a later, separate task behind the same interface.** Phase 3 adds a site-scoped mock saved payment method with no card-shaped UI, a step-up re-authentication gate on reusing it (§6.4, §9.4), and a duplicate-active-request guard. Phase 6 adds the two-tier site model (manager = unlimited; authorized user = manager-set limit with over-limit requests routed to a manager's approval, §10).
+- **Payments:** Stripe manual-capture PaymentIntents with idempotency keys; capture/cancel is Company-Admin/internal-backend only; server-derived price (§8, §9). **Phase 2/3/6 implement this against a mocked `PaymentGateway` (§9.3) — no Stripe SDK, no live keys, no real card collection or money movement — with the real Stripe integration tracked as a later, separate task behind the same interface.** Phase 3 adds a site-scoped mock saved payment method with no card-shaped UI and a step-up re-authentication gate on reusing it (§6.4, §9.4) — Phase 3 also originally added a duplicate-active-request guard, later removed by explicit product decision (§9.4, changelog #029). Phase 6 adds the two-tier site model (manager = unlimited; authorized user = manager-set limit with over-limit requests routed to a manager's approval, §10).
 - **Database:** Aurora Serverless v2 PostgreSQL with Drizzle ORM for typed, parameterized queries and migrations.
 - **Public alerts:** neutral "see staff" page only for MVP (§11).
 - **Delivery:** build and host in the sandbox first; PR into `main` and AWS deploy only after human review, per the Blueprint's sandbox-first build plan.
@@ -741,6 +740,118 @@ here. Format:
 - **Entry number:** sequential, zero-padded to three digits (`#001`, `#002`, …).
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
+
+### #029 — 2026-08-24T21:00:00-04:00
+
+**Feature (product-facing)**: a bathroom may now have any number of
+simultaneous non-terminal `CleaningRequest`s, instead of at most one. Removed
+by explicit product decision -- confirmed with the user (who was hitting it
+while testing) that the specific behavior to remove was the same-bathroom
+duplicate guard, not the (unaffected, unrelated) per-site multi-bathroom
+concurrency that already worked before this change.
+
+This guard was a real, deliberately-documented Phase 3 feature (SDD §9.4,
+originally added per changelog #005-era entries), not a bug -- removing it
+means removing a genuine anti-duplicate-charge safeguard, so this was
+confirmed via `AskUserQuestion` before any code changed, along with a
+follow-up question on whether the manager console's capture/cancel list
+needed anything added to distinguish multiple simultaneous requests for one
+bathroom (explicit answer: no, leave it as request-id/timestamp for now).
+
+- `src/db/schema.ts`: dropped the `cleaning_requests_bathroom_active_key`
+  partial unique index from `cleaningRequests`.
+- `drizzle/0005_light_dragon_lord.sql`: generated via `npm run db:generate`
+  (not hand-written) -- a single `DROP INDEX`.
+- `src/payments/service.ts`: removed `createCleaningRequest`'s pre-check
+  query, the unique-violation-to-`DuplicateActiveRequestError` mapping on
+  insert, and the `DuplicateActiveRequestError` class itself (nothing can
+  throw it any more). Reworded the still-live `saveSitePaymentMethod`
+  docstring, which had compared its own backstop to "the duplicate-active-
+  request guard above" -- that comparison point no longer exists in this
+  file.
+- `src/manager/routes.ts` / `src/public/routes.ts`: removed the now-dead
+  `instanceof DuplicateActiveRequestError` -> `409` handling in both (the
+  approval-grant path and the direct scan-and-authorize path, respectively);
+  the `public/routes.ts` site collapsed to a plain `await` since the
+  try/catch existed solely for this one error type.
+- Tests: `test/payments.test.ts`'s guard-rejection test replaced with one
+  asserting the new behavior (two concurrent requests for one bathroom both
+  reach the gateway and persist as independent rows); its unrelated
+  `listPendingCaptures` test had a now-stale comment justifying a two-
+  bathroom setup by the old guard, corrected (the two-bathroom setup itself
+  was incidental, not required, so it was left as-is). `test/public-
+authorize.test.ts`'s HTTP-level double-tap-race test similarly replaced:
+  it asserted exactly one `200`/one `409` and one persisted row; now asserts
+  both attempts succeed as two independent persisted rows.
+  `test/unique-violation.test.ts`'s doc comment listing `isUniqueViolation`'s
+  consumers dropped the removed one, kept the two that still exist (the §3.3
+  invite bridge, the one-payment-method-per-site guard).
+- `SDD.md`: updated every live spec-body reference to this guard (§3.3's
+  `isUniqueViolation` consumer list, the §4 entity/referential-notes table,
+  §9.4's own description, §10's cross-reference, §11.7's HTTP-surface
+  description, §13's stack-decision summary) to describe its removal rather
+  than describe it as present. Historical entries describing Phase 3 as it
+  was originally documented (the "Last edited" blockquote near the top, and
+  changelog entries #005-era and #011) were deliberately left untouched --
+  they were accurate records of what was true when written, not live spec.
+
+Validated with `npx tsc --noEmit` (only the same 3 pre-existing, unrelated
+errors), `npm run lint`, `npm test` (full suite, 218/218 passing -- 214
+pre-existing + 2 rewritten tests, net test count unchanged since both
+replacements are 1:1 swaps of the old assertion for the new one, not
+additions), `npm run test:coverage` (83.28% lines / 82.62% branches / 90.91%
+functions -- comfortably above the 73/81/77 floor, no regression), and a
+real `npm run db:generate` producing exactly the expected single-line `DROP
+INDEX` migration (confirmed by running the full suite against PGlite with
+migrations freshly applied, not just eyeballing the generated SQL).
+
+### #028 — 2026-08-24T20:00:00-04:00
+
+**Feature (product-facing)**: after signing in, a user previously always
+landed on `/` -- the generic "SSR scaffold" placeholder -- regardless of
+role. Now the post-login redirect matches the user's own authority: a
+company_admin lands on `/admin`, an authorized manager on `/manager`, an
+authorized_user on a new `/start` page ("Tap the NFC tag or scan the QR code
+in the bathroom to request service"), and only someone with no role at all
+still lands on `/` -- which itself now distinguishes a signed-in no-role
+visitor ("You don't have access to any site yet. Contact your
+administrator.") from an anonymous one (a sign-in prompt), rather than
+showing the same placeholder copy to both.
+
+- `src/db/access.ts`: `resolvePostLoginDestination(db, userId)` -- read-only,
+  picks the highest-authority destination when a user holds more than one
+  role simultaneously (platform_role and SiteRole are independent, so this is
+  a real case, not hypothetical -- see this session's own "test admin and
+  manager with one number" guidance). Never itself an authorization decision;
+  every destination still re-derives its own authorization independently on
+  load (§7).
+- `src/auth/routes.ts` (`handleCallback`): calls it as the fallback when
+  there's no safe `returnTo` cookie -- the existing step-up re-authentication
+  return-to-caller behavior (§6.4) still takes priority over the role-based
+  destination, confirmed by a new test asserting a company_admin's callback
+  still honors a pending `returnTo` rather than landing on `/admin`.
+- `src/render/templates/home.ts`: `renderHomePage` now takes a required
+  `{ signedIn: boolean }` and switches copy accordingly.
+- `src/render/templates/start.ts`: new, the authorized_user landing page.
+  Purely instructional -- an authorized_user's actual role is exercised by
+  scanning a QR code (`GET /s/:token`, `src/public/routes.ts`), not anything
+  on this page itself.
+- `src/server/app.ts`: `/` now checks the session (`readSession`, no DB call)
+  to pick which `renderHomePage` copy to show; new `GET /start` registered,
+  ungated (nothing sensitive on it, same as `/`).
+- Manager's destination (`/manager`) and the signed-in-no-role copy were both
+  explicit product choices, confirmed with the user via AskUserQuestion
+  rather than assumed, alongside their explicitly-stated admin -> `/admin`
+  and authorized_user -> `/start`-style page.
+
+Validated with `npx tsc --noEmit` (only the same 3 pre-existing, unrelated
+errors), `npm run lint`, `npm test` (full suite, 218/218 passing -- 214
+pre-existing + 4 new tests in `test/sms-otp.test.ts` covering all three
+role-based destinations plus the returnTo-still-wins case; the existing
+`renderHomePage` test in `test/render.test.ts` was updated in place for the
+new required `signedIn` param rather than added as a new test), and `npm run
+test:coverage` (83.23% lines / 82.54% branches / 91.00% functions --
+comfortably above the 73/81/77 floor, no regression).
 
 ### #027 — 2026-08-24T19:00:00-04:00
 

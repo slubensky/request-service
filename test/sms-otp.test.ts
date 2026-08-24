@@ -26,8 +26,9 @@ import type { AuthRuntime } from '../src/auth/config.js';
 import type { CognitoConfig } from '../src/auth/cognito.js';
 import type { PgConnection } from '../src/db/client.js';
 import { verifySession } from '../src/auth/session.js';
-import { users } from '../src/db/schema.js';
-import { createTestDatabase } from './helpers/pglite.js';
+import { siteRoles, users } from '../src/db/schema.js';
+import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
+import { createSite } from '../src/admin/service.js';
 
 const config: CognitoConfig = {
   domain: 'https://example.auth.us-east-1.amazoncognito.com',
@@ -114,10 +115,16 @@ interface CallbackResult {
  * token endpoint is stubbed via a temporary global fetch override, restored in
  * a finally block so it never leaks across tests.
  */
-async function driveCallback(claims: Record<string, unknown>): Promise<CallbackResult> {
+async function driveCallback(
+  claims: Record<string, unknown>,
+  seed?: (db: TestDatabase['db']) => Promise<void>,
+): Promise<CallbackResult> {
   const { privateKey, jwks } = await makeKeys();
   const idToken = await signSmsOtpIdToken(privateKey, claims);
   const { db, client } = await createTestDatabase();
+  if (seed) {
+    await seed(db);
+  }
   const runtime: AuthRuntime = {
     cognito: config,
     sessionSecret: SESSION_SECRET,
@@ -189,4 +196,117 @@ test('SMS OTP callback does not persist an unverified phone number', async () =>
 
   assert.equal(res.statusCode, 302);
   assert.equal(phone, null);
+});
+
+test('SMS OTP callback lands a company_admin on /admin, not the generic home page', async () => {
+  const { res } = await driveCallback(
+    { phone_number: '+15555550200', phone_number_verified: true },
+    async (db) => {
+      await db.insert(users).values({ cognitoSub: SUB, platformRole: 'company_admin' });
+    },
+  );
+
+  assert.equal(res.statusCode, 302);
+  assert.equal(res.headers.Location, '/admin');
+});
+
+test('SMS OTP callback lands an authorized manager on /manager', async () => {
+  const { res } = await driveCallback(
+    { phone_number: '+15555550201', phone_number_verified: true },
+    async (db) => {
+      const site = await createSite(db, {
+        name: 'Central Plaza',
+        address: '1 Market St',
+        timezone: 'America/New_York',
+        currency: 'usd',
+        fixedPriceCents: 4500,
+      });
+      const [user] = await db.insert(users).values({ cognitoSub: SUB }).returning();
+      assert.ok(user);
+      await db
+        .insert(siteRoles)
+        .values({ siteId: site.id, userId: user.id, role: 'manager', status: 'authorized' });
+    },
+  );
+
+  assert.equal(res.statusCode, 302);
+  assert.equal(res.headers.Location, '/manager');
+});
+
+test('SMS OTP callback lands an authorized_user on /start', async () => {
+  const { res } = await driveCallback(
+    { phone_number: '+15555550202', phone_number_verified: true },
+    async (db) => {
+      const site = await createSite(db, {
+        name: 'Central Plaza',
+        address: '1 Market St',
+        timezone: 'America/New_York',
+        currency: 'usd',
+        fixedPriceCents: 4500,
+      });
+      const [user] = await db.insert(users).values({ cognitoSub: SUB }).returning();
+      assert.ok(user);
+      await db.insert(siteRoles).values({
+        siteId: site.id,
+        userId: user.id,
+        role: 'authorized_user',
+        status: 'authorized',
+        maxAuthorizationCents: 5000,
+      });
+    },
+  );
+
+  assert.equal(res.statusCode, 302);
+  assert.equal(res.headers.Location, '/start');
+});
+
+test('SMS OTP callback still honors a safe returnTo over the role-based destination', async () => {
+  const { privateKey, jwks } = await makeKeys();
+  const idToken = await signSmsOtpIdToken(privateKey, {
+    phone_number: '+15555550203',
+    phone_number_verified: true,
+  });
+  const { db: db2, client: client2 } = await createTestDatabase();
+  await db2.insert(users).values({ cognitoSub: SUB, platformRole: 'company_admin' });
+  const runtime: AuthRuntime = {
+    cognito: config,
+    sessionSecret: SESSION_SECRET,
+    connection: { db: db2, pool: undefined } as unknown as PgConnection,
+    jwksFor: () => jwks,
+  };
+  const router = new Router();
+  registerAuthRoutes(router, runtime);
+  const matched = router.match('GET', '/auth/callback');
+  assert.ok(matched);
+  const req = {
+    headers: {
+      cookie: `rs_oauth_state=${STATE}; rs_oauth_return_to=${encodeURIComponent('/s/abc123')}`,
+    },
+  } as unknown as IncomingMessage;
+  const res = new CapturingResponse();
+  const ctx: RouteContext = {
+    req,
+    res: res as unknown as ServerResponse,
+    params: {},
+    query: { code: 'auth-code-1', state: STATE },
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () =>
+    Promise.resolve(
+      new Response(JSON.stringify({ id_token: idToken, access_token: 'access.jwt' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+  try {
+    await matched.handler(ctx);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await client2.close();
+  }
+
+  // Even though this identity is company_admin (would otherwise land on /admin),
+  // an already-validated returnTo cookie still wins (SDD §6.4 step-up re-auth).
+  assert.equal(res.statusCode, 302);
+  assert.equal(res.headers.Location, '/s/abc123');
 });

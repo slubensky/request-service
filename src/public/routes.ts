@@ -43,7 +43,6 @@ import { sendText } from '../server/respond.js';
 import { sites } from '../db/schema.js';
 import {
   createCleaningRequest,
-  DuplicateActiveRequestError,
   getSitePaymentMethod,
   saveSitePaymentMethod,
   SitePaymentMethodAlreadyExistsError,
@@ -280,21 +279,12 @@ export function registerPublicRoutes(
       sendText(res, 401, 'Re-authentication required');
       return;
     }
-    let request;
-    try {
-      ({ request } = await createCleaningRequest(db, gateway, {
-        siteId: resolved.siteId,
-        bathroomId: resolved.bathroomId,
-        requestedByUserId: session.userId,
-        amountCents,
-      }));
-    } catch (error) {
-      if (error instanceof DuplicateActiveRequestError) {
-        sendText(res, 409, error.message);
-        return;
-      }
-      throw error;
-    }
+    const { request } = await createCleaningRequest(db, gateway, {
+      siteId: resolved.siteId,
+      bathroomId: resolved.bathroomId,
+      requestedByUserId: session.userId,
+      amountCents,
+    });
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(renderAuthorizedPage(request.amountCents));
   });

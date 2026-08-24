@@ -13,7 +13,6 @@ import {
   cancelCleaningRequest,
   captureCleaningRequest,
   createCleaningRequest,
-  DuplicateActiveRequestError,
   getSitePaymentMethod,
   InvalidPaymentStateError,
   listPendingCaptures,
@@ -114,9 +113,6 @@ test('listPendingCaptures returns only requires_capture authorizations, newest l
   const { db, client } = await createTestDatabase();
   try {
     const { siteId, bathroomId, userId } = await seed(db);
-    // A second, distinct bathroom: the duplicate-active-request guard (SDD §9.4) forbids
-    // two concurrent non-terminal requests for the *same* bathroom, so two outstanding
-    // holds in this test must be for different bathrooms.
     const secondBathroom = await addBathroom(db, siteId, 'Second floor');
     const gateway = new MockPaymentGateway();
     const { authorization: first } = await createCleaningRequest(db, gateway, {
@@ -257,7 +253,7 @@ test('canceling an already-canceled authorization is rejected', async () => {
   }
 });
 
-test('createCleaningRequest rejects a second active request for the same bathroom before calling the gateway (SDD §9.4)', async () => {
+test('createCleaningRequest allows a second simultaneous active request for the same bathroom (SDD §9.4)', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const { siteId, bathroomId, userId } = await seed(db);
@@ -272,27 +268,28 @@ test('createCleaningRequest rejects a second active request for the same bathroo
       cancel: countingGateway.cancel.bind(countingGateway),
     };
 
-    await createCleaningRequest(db, gateway, {
+    const first = await createCleaningRequest(db, gateway, {
       siteId,
       bathroomId,
       requestedByUserId: userId,
       amountCents: 4500,
     });
-    assert.equal(authorizeCalls, 1);
+    const second = await createCleaningRequest(db, gateway, {
+      siteId,
+      bathroomId,
+      requestedByUserId: userId,
+      amountCents: 4500,
+    });
 
-    await assert.rejects(
-      () =>
-        createCleaningRequest(db, gateway, {
-          siteId,
-          bathroomId,
-          requestedByUserId: userId,
-          amountCents: 4500,
-        }),
-      DuplicateActiveRequestError,
-    );
-    // The rejected second attempt never reached the gateway.
-    assert.equal(authorizeCalls, 1);
-    assert.equal((await db.select().from(cleaningRequests)).length, 1);
+    // Both requests reached the gateway and persisted as independent rows.
+    assert.equal(authorizeCalls, 2);
+    assert.notEqual(first.request.id, second.request.id);
+    const rows = await db
+      .select()
+      .from(cleaningRequests)
+      .where(eq(cleaningRequests.bathroomId, bathroomId));
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.map((r) => r.status).sort(), ['authorized', 'authorized']);
   } finally {
     await client.close();
   }

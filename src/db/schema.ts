@@ -136,34 +136,23 @@ export const siteRoles = pgTable(
   ],
 );
 
-export const cleaningRequests = pgTable(
-  'cleaning_requests',
-  {
-    id: id(),
-    siteId: uuid('site_id')
-      .notNull()
-      .references(() => sites.id, { onDelete: 'cascade' }),
-    bathroomId: uuid('bathroom_id')
-      .notNull()
-      .references(() => bathrooms.id, { onDelete: 'cascade' }),
-    requestedByUserId: uuid('requested_by_user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'restrict' }),
-    // Server-derived price snapshot so later Site price changes cannot alter it (SDD §4.1, §8).
-    priceVersion: integer('price_version').notNull(),
-    amountCents: integer('amount_cents').notNull(),
-    status: cleaningRequestStatus('status').notNull().default('authorizing'),
-    createdAt: createdAt(),
-  },
-  (table) => [
-    // Duplicate-active-request guard backstop (SDD §9.4): at most one non-terminal
-    // request per bathroom. The app checks this before any gateway call; this partial
-    // unique index makes a true double-tap race impossible to write twice.
-    uniqueIndex('cleaning_requests_bathroom_active_key')
-      .on(table.bathroomId)
-      .where(sql`${table.status} IN ('authorizing', 'authorized')`),
-  ],
-);
+export const cleaningRequests = pgTable('cleaning_requests', {
+  id: id(),
+  siteId: uuid('site_id')
+    .notNull()
+    .references(() => sites.id, { onDelete: 'cascade' }),
+  bathroomId: uuid('bathroom_id')
+    .notNull()
+    .references(() => bathrooms.id, { onDelete: 'cascade' }),
+  requestedByUserId: uuid('requested_by_user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'restrict' }),
+  // Server-derived price snapshot so later Site price changes cannot alter it (SDD §4.1, §8).
+  priceVersion: integer('price_version').notNull(),
+  amountCents: integer('amount_cents').notNull(),
+  status: cleaningRequestStatus('status').notNull().default('authorizing'),
+  createdAt: createdAt(),
+});
 
 export const paymentAuthorizations = pgTable(
   'payment_authorizations',
