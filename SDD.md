@@ -742,6 +742,54 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #028 — 2026-08-24T20:00:00-04:00
+
+**Feature (product-facing)**: after signing in, a user previously always
+landed on `/` -- the generic "SSR scaffold" placeholder -- regardless of
+role. Now the post-login redirect matches the user's own authority: a
+company_admin lands on `/admin`, an authorized manager on `/manager`, an
+authorized_user on a new `/start` page ("Tap the NFC tag or scan the QR code
+in the bathroom to request service"), and only someone with no role at all
+still lands on `/` -- which itself now distinguishes a signed-in no-role
+visitor ("You don't have access to any site yet. Contact your
+administrator.") from an anonymous one (a sign-in prompt), rather than
+showing the same placeholder copy to both.
+
+- `src/db/access.ts`: `resolvePostLoginDestination(db, userId)` -- read-only,
+  picks the highest-authority destination when a user holds more than one
+  role simultaneously (platform_role and SiteRole are independent, so this is
+  a real case, not hypothetical -- see this session's own "test admin and
+  manager with one number" guidance). Never itself an authorization decision;
+  every destination still re-derives its own authorization independently on
+  load (§7).
+- `src/auth/routes.ts` (`handleCallback`): calls it as the fallback when
+  there's no safe `returnTo` cookie -- the existing step-up re-authentication
+  return-to-caller behavior (§6.4) still takes priority over the role-based
+  destination, confirmed by a new test asserting a company_admin's callback
+  still honors a pending `returnTo` rather than landing on `/admin`.
+- `src/render/templates/home.ts`: `renderHomePage` now takes a required
+  `{ signedIn: boolean }` and switches copy accordingly.
+- `src/render/templates/start.ts`: new, the authorized_user landing page.
+  Purely instructional -- an authorized_user's actual role is exercised by
+  scanning a QR code (`GET /s/:token`, `src/public/routes.ts`), not anything
+  on this page itself.
+- `src/server/app.ts`: `/` now checks the session (`readSession`, no DB call)
+  to pick which `renderHomePage` copy to show; new `GET /start` registered,
+  ungated (nothing sensitive on it, same as `/`).
+- Manager's destination (`/manager`) and the signed-in-no-role copy were both
+  explicit product choices, confirmed with the user via AskUserQuestion
+  rather than assumed, alongside their explicitly-stated admin -> `/admin`
+  and authorized_user -> `/start`-style page.
+
+Validated with `npx tsc --noEmit` (only the same 3 pre-existing, unrelated
+errors), `npm run lint`, `npm test` (full suite, 218/218 passing -- 214
+pre-existing + 4 new tests in `test/sms-otp.test.ts` covering all three
+role-based destinations plus the returnTo-still-wins case; the existing
+`renderHomePage` test in `test/render.test.ts` was updated in place for the
+new required `signedIn` param rather than added as a new test), and `npm run
+test:coverage` (83.23% lines / 82.54% branches / 91.00% functions --
+comfortably above the 73/81/77 floor, no regression).
+
 ### #027 — 2026-08-24T19:00:00-04:00
 
 **Docs (deployment, no product-facing change)**: with the invite SMS (#025)

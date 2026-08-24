@@ -6,13 +6,14 @@ import { fileURLToPath } from 'node:url';
 import { Router } from './router.js';
 import { serveStaticFile } from './static.js';
 import { renderHomePage } from '../render/templates/home.js';
+import { renderStartPage } from '../render/templates/start.js';
 import { getAuthRuntime } from '../auth/config.js';
 import { registerAuthRoutes } from '../auth/routes.js';
 import { registerAdminRoutes } from '../admin/routes.js';
 import { registerManagerRoutes } from '../manager/routes.js';
 import { registerPublicRoutes } from '../public/routes.js';
 import { registerDemoRoutes, isDemoAcceptSubmission } from '../demo/routes.js';
-import { passesCsrf } from '../auth/guard.js';
+import { passesCsrf, readSession } from '../auth/guard.js';
 import type { AuthRuntime } from '../auth/config.js';
 import { MockPaymentGateway } from '../payments/gateway.js';
 import { MockSmsGateway, type SmsGateway } from '../sms/gateway.js';
@@ -30,9 +31,16 @@ function buildRouter(runtime: AuthRuntime, smsGateway: SmsGateway): Router {
     res.end(JSON.stringify({ status: 'ok' }));
   });
 
-  router.get('/', ({ res }) => {
+  router.get('/', ({ req, res }) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(renderHomePage());
+    res.end(renderHomePage({ signedIn: readSession(req, runtime) !== null }));
+  });
+
+  // Post-login landing for an authorized_user (resolvePostLoginDestination) --
+  // purely instructional, no session gate needed (nothing sensitive on it).
+  router.get('/start', ({ res }) => {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderStartPage());
   });
 
   registerAuthRoutes(router, runtime);

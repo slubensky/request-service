@@ -130,6 +130,39 @@ export async function resolvePrincipal(
 }
 
 /**
+ * Where a just-signed-in user should land: `/admin` for a company_admin,
+ * `/manager` for an authorized manager at any site, `/start` for an
+ * authorized_user at any site, else `/` (no role yet). Priority order
+ * mirrors the app's own authority hierarchy -- a user can hold more than one
+ * of these simultaneously (SDD: platform_role and SiteRole are independent),
+ * so this picks the highest-authority one to land on, not an arbitrary one.
+ * Read-only and only ever used to pick a redirect target; every destination
+ * still re-derives its own authorization independently on load (§7) -- this
+ * is not itself an authorization decision.
+ */
+export async function resolvePostLoginDestination(
+  db: AppDatabase,
+  userId: string,
+): Promise<string> {
+  const platformRole = await getPlatformRole(db, userId);
+  if (platformRole === 'company_admin') {
+    return '/admin';
+  }
+
+  const roles = await db
+    .select({ role: siteRoles.role })
+    .from(siteRoles)
+    .where(and(eq(siteRoles.userId, userId), eq(siteRoles.status, 'authorized')));
+  if (roles.some((r) => r.role === 'manager')) {
+    return '/manager';
+  }
+  if (roles.some((r) => r.role === 'authorized_user')) {
+    return '/start';
+  }
+  return '/';
+}
+
+/**
  * Maps a verified Cognito subject to a User row, creating one on first login.
  * Identity only -- creating the row grants no authority (see SDD §3). `phone`
  * is stored when Cognito supplies a verified value, so a manager's pending

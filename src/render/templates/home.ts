@@ -1,18 +1,30 @@
 import { renderLayout } from './layout.js';
 
 /**
- * Renders the scaffold home page. This is a placeholder for the eventual
- * QR-scan entry point (see SDD.md); it exists in this PR only to prove the
- * SSR pipeline (router -> template -> HTML response) end to end.
+ * Renders the home page. Reached directly by an anonymous visitor, or as the
+ * post-login landing spot for a signed-in user who holds no role anywhere
+ * (resolvePostLoginDestination) -- a company_admin/manager/authorized_user
+ * lands on their own console/page instead (SDD §3, §6). `signedIn` picks
+ * between the two: an anonymous visitor gets a sign-in prompt, a signed-in
+ * no-role user gets told to contact an administrator, not the same copy.
  */
-export function renderHomePage(): string {
-  const bodyHtml = `
+export function renderHomePage({ signedIn }: { signedIn: boolean }): string {
+  const bodyHtml = signedIn
+    ? `
       <header class="page-header">
         <h1>Request Service</h1>
-        <p class="subtitle">QR bathroom cleaning, scaffolded.</p>
       </header>
       <section class="card">
-        <p>This is the SSR scaffold. No client framework, no bundler.</p>
+        <p>You don't have access to any site yet. Contact your administrator.</p>
+      </section>
+  `
+    : `
+      <header class="page-header">
+        <h1>Request Service</h1>
+        <p class="subtitle">QR bathroom cleaning.</p>
+      </header>
+      <section class="card">
+        <p><a href="/auth/login">Sign in</a> to get started.</p>
       </section>
   `;
   return renderLayout({ title: 'Request Service', bodyHtml });

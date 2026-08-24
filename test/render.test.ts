@@ -18,11 +18,15 @@ test('renderLayout escapes the title and embeds the body', () => {
   assert.match(html, /<script type="module" src="\/js\/main\.js"><\/script>/);
 });
 
-test('renderHomePage produces a full HTML document with expected content', () => {
-  const html = renderHomePage();
+test('renderHomePage produces a full HTML document, and switches copy on signedIn', () => {
+  const anonymous = renderHomePage({ signedIn: false });
+  assert.match(anonymous, /<!doctype html>/);
+  assert.match(anonymous, /<html lang="en">/);
+  assert.match(anonymous, /Request Service/);
+  assert.match(anonymous, /<link rel="stylesheet" href="\/css\/base\.css" \/>/);
+  assert.match(anonymous, /href="\/auth\/login"/);
 
-  assert.match(html, /<!doctype html>/);
-  assert.match(html, /<html lang="en">/);
-  assert.match(html, /Request Service/);
-  assert.match(html, /<link rel="stylesheet" href="\/css\/base\.css" \/>/);
+  const signedIn = renderHomePage({ signedIn: true });
+  assert.match(signedIn, /don't have access to any site yet/);
+  assert.doesNotMatch(signedIn, /href="\/auth\/login"/);
 });

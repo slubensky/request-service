@@ -25,7 +25,11 @@ import {
   verifyIdToken,
 } from './cognito.js';
 import { clearCookie, parseCookies, serializeCookie } from './cookies.js';
-import { bridgePendingSiteRoles, findOrCreateUserByCognitoSub } from '../db/access.js';
+import {
+  bridgePendingSiteRoles,
+  findOrCreateUserByCognitoSub,
+  resolvePostLoginDestination,
+} from '../db/access.js';
 import { readSession } from './guard.js';
 import { signSession } from './session.js';
 
@@ -134,9 +138,13 @@ async function handleCallback(runtime: AuthRuntime, ctx: RouteContext): Promise<
     // Step-up re-authentication (SDD §6.4): return to the page that requested re-auth, if
     // one was recorded and still passes the allow-list -- re-checked here even though only
     // an already-validated value is ever stored, since this cookie is the sole source of
-    // truth for where to redirect. Falls back to '/' exactly as before this change.
+    // truth for where to redirect. Otherwise, land on the console matching the user's own
+    // authority (resolvePostLoginDestination) rather than the generic home page.
     const returnTo = parseCookies(req.headers.cookie)[RETURN_TO_COOKIE];
-    const destination = returnTo && isSafeReturnPath(returnTo) ? returnTo : '/';
+    const destination =
+      returnTo && isSafeReturnPath(returnTo)
+        ? returnTo
+        : await resolvePostLoginDestination(runtime.connection.db, user.id);
     redirect(res, destination, [
       sessionCookie,
       clearCookie(STATE_COOKIE),
