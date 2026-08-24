@@ -742,6 +742,45 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #021 — 2026-08-24T09:00:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: after #020 got the Cognito
+pool creating successfully, the lean EC2 deployment's own app container never
+started. `docker-compose ps` on the instance showed no containers at all, and
+`cloud-init-output.log` showed why: `postgres:16` pulled fine (a pull, not a
+build), but building the app image failed with `compose build requires
+buildx 0.17.0 or later`, so `docker-compose up -d --build` errored out mid
+first-boot and cloud-init logged the `scripts-user` module as failed and moved
+on -- silently, with no containers ever created.
+
+Root cause: `infra/modules/ec2_host/user_data.sh.tpl` installs the standalone
+`docker-compose` binary (Compose V2, now versioned independently of the
+`docker-compose`/`docker compose` distinction -- confirmed on the instance as
+`v5.5.0`) directly from GitHub releases, but never installs a `buildx` CLI
+plugin of its own. AL2023's `dnf install docker` pulls in an older bundled
+`buildx` below the floor this Compose build requires, and Compose V2's build
+path has no legacy fallback -- it errors rather than falling back to the
+daemon's classic non-buildx builder.
+
+Fix: install a pinned, known-good `buildx` release (`v0.19.3`) into
+`/usr/libexec/docker/cli-plugins/docker-buildx` (the standard system-wide
+Docker CLI plugin directory on RPM-based distros, so it's picked up
+automatically and takes precedence regardless of where AL2023's bundled
+version, if any, actually lives) before the `git clone`/`docker-compose up`
+steps in `user_data.sh.tpl`. Pinned rather than resolved via GitHub's API at
+boot time, to avoid an extra network round-trip and rate-limit risk during
+first boot for a value that only needs to clear a fixed version floor.
+
+Not yet re-confirmed end-to-end against a fresh `terraform apply` (the
+already-running instance from #020 was fixed manually in place, matching this
+same plugin install, to unblock testing without tearing down and losing the
+already-verified Elastic IP/DNS-adjacent state); the template fix mirrors
+exactly what was verified working by hand on that instance.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+(real `terraform` binary, `-backend=false`). `npm test`/`lint`/`build`
+unaffected (no `src/` changes).
+
 ### #020 — 2026-08-23T20:15:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: #019's fix did not actually
