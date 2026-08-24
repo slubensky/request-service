@@ -32,9 +32,14 @@ variable "instance_type" {
 }
 
 variable "app_port" {
-  description = "Port the app listens on and that is opened to the internet."
+  description = "Port the app listens on inside the container. The internet-facing port is always 443 (mapped to this one) -- see docker-compose.yml."
   type        = number
   default     = 3000
+}
+
+variable "domain_name" {
+  description = "Real domain or subdomain pointing at this deployment (e.g. test.example.com). Point its DNS A record at the Elastic IP BEFORE applying -- Let's Encrypt's HTTP-01 challenge at first boot needs the domain to already resolve there. See infra/README.md."
+  type        = string
 }
 
 variable "repo_url" {

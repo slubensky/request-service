@@ -128,11 +128,10 @@ shared S3 backend) since it's meant to be stood up and torn down freely — neve
 CI's `terraform validate` step (that runs against `infra/` only), though `terraform
 fmt -check -recursive` does cover it since CI runs recursively from `infra/`.
 
-**Known limitation**: WebAuthn/passkeys require a real registrable domain, not a
-bare IP, so passkey enrollment does not work against this deployment — it tests
-SMS OTP only. Also, since the app terminates TLS itself with a self-signed
-certificate (there is no real domain to get a trusted cert for), your browser
-will show a one-time security warning the first time you visit — click through it.
+A real domain (`domain_name`) backs this deployment, so both SMS OTP and
+WebAuthn/passkey enrollment work against it, and the app terminates TLS with a
+real, browser-trusted Let's Encrypt certificate (Certbot, run by the instance's
+own user-data) — no self-signed-cert warning to click through.
 
 **Test with a real mobile carrier number, not Google Voice** (confirmed against a
 real deploy): this app's own invite SMS (a plain informational text) delivers to
@@ -163,21 +162,52 @@ TOLL_FREE`) and complete its registration via the AWS Console (End User
   same-day unblock, so start it well before you plan to demo SMS OTP.
 - Create or import an EC2 key pair in the AWS console (for optional SSH access;
   the deployment itself doesn't need you to SSH in — user-data does everything).
+- **A domain or subdomain you control**, with its DNS hosted somewhere you can add
+  an `A` record manually (this repo doesn't manage third-party DNS with
+  Terraform). You'll point it at this deployment's Elastic IP — see "Deploy"
+  below for the exact sequencing; it must already resolve there **before** you
+  apply, or Let's Encrypt's domain-ownership check at first boot fails.
 
 ### Deploy
+
+Elastic IPs in this composition are allocated independently of the instance
+(`aws_eip.app`), so you can get a stable IP to point DNS at **before** creating
+anything else, in two applies:
 
 ```sh
 cd infra/lean
 terraform init
+# First apply: just enough to get a stable Elastic IP. Everything else in this
+# composition needs domain_name to already resolve, which needs this IP first.
+terraform apply -target=aws_eip.app \
+  -var="cognito_domain_prefix=<pick-a-globally-unique-prefix>" \
+  -var="key_name=<your-ec2-key-pair-name>" \
+  -var="allowed_ssh_cidr=<your-ip>/32" \
+  -var="domain_name=<your-domain>"
+terraform output public_ip
+```
+
+Add an `A` record for `<your-domain>` pointing at that IP with your DNS
+provider, then confirm it's actually resolving (propagation can take anywhere
+from seconds to a few minutes depending on provider/TTL) before continuing:
+
+```sh
+dig +short <your-domain>    # should print the same IP
+```
+
+Once that matches, apply the rest:
+
+```sh
 terraform apply \
   -var="cognito_domain_prefix=<pick-a-globally-unique-prefix>" \
   -var="key_name=<your-ec2-key-pair-name>" \
-  -var="allowed_ssh_cidr=<your-ip>/32"
+  -var="allowed_ssh_cidr=<your-ip>/32" \
+  -var="domain_name=<your-domain>"
 ```
 
 Wait a minute or two after apply for the instance's user-data to finish (installs
-Docker, generates the self-signed cert, clones this repo, builds the image, runs
-migrations, and starts the app).
+Docker, installs Certbot and obtains a real certificate for `domain_name`,
+clones this repo, builds the image, runs migrations, and starts the app).
 
 **Required one-time step, every fresh pool:** Terraform creates the user pool
 domain but cannot yet create its managed-login branding (the
@@ -197,12 +227,14 @@ aws cognito-idp create-managed-login-branding \
 Then:
 
 ```sh
-terraform output app_url    # https://<elastic-ip>:3000
+terraform output app_url    # https://<your-domain>
 ```
 
-Visit that URL, click through the certificate warning, and walk the real
-Cognito Hosted UI → SMS OTP → callback flow. `terraform output ssh_command` gets
-you in for troubleshooting (`docker compose logs` in `/opt/app`) if needed.
+Visit that URL and walk the real Cognito Hosted UI → SMS OTP → callback flow —
+no certificate warning this time. `terraform output ssh_command` gets you in
+for troubleshooting (`docker-compose logs` in `/opt/app`) if needed; Certbot's
+own renewal runs twice daily via cron and only actually renews within ~30 days
+of expiry (`sudo certbot certificates` shows current status/expiry).
 
 ### Tear down
 
