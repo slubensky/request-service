@@ -58,6 +58,22 @@ resource "aws_iam_role_policy" "instance_secrets" {
   policy = data.aws_iam_policy_document.instance_secrets.json
 }
 
+# Lets the app send invite SMS via SNS (src/sms/sns-gateway.ts) using this same
+# instance role -- no access key ever enters runtime_environment_variables/secrets.
+data "aws_iam_policy_document" "instance_sns" {
+  statement {
+    effect    = "Allow"
+    actions   = ["sns:Publish"]
+    resources = ["*"] # SMS publish has no per-number resource ARN to scope to.
+  }
+}
+
+resource "aws_iam_role_policy" "instance_sns" {
+  name   = "${var.name_prefix}-apprunner-sns"
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.instance_sns.json
+}
+
 resource "aws_apprunner_vpc_connector" "this" {
   vpc_connector_name = "${var.name_prefix}-connector"
   subnets            = var.subnet_ids

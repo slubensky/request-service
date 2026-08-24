@@ -80,6 +80,21 @@ No secret value is ever hardcoded or stored in Terraform:
   value is set out of band (CLI/console). App Runner reads all secrets at runtime via
   a least-privilege instance role.
 
+## Invite SMS delivery
+
+Inviting a manager or authorized user (SDD §11.1, §11.4) sends a real text via
+Amazon SNS (`src/sms/sns-gateway.ts`) -- the same account/region mechanism
+Cognito's own SMS OTP already uses, not a separate service. Both compositions
+grant their instance/task role `sns:Publish` (`modules/app_runner`'s
+`instance` role here; `modules/ec2_host`'s own `instance` role in the lean
+deployment) -- no access key ever enters an env file or Secrets Manager for
+this. The same SNS sandbox / origination-identity prerequisites documented
+under "Lean test deployment" below apply here too: without a registered
+origination identity, invite texts fail silently exactly like OTP codes did.
+
+A send failure never blocks or rolls back the invite itself (it's still
+created, and the console/log surfaces the failure) -- see `src/sms/gateway.ts`.
+
 ## Backend
 
 `terraform init` for a real deploy needs backend config supplied out of band, e.g.:

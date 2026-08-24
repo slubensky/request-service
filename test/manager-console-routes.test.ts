@@ -17,6 +17,7 @@ import { signSession } from '../src/auth/session.js';
 import { createSite } from '../src/admin/service.js';
 import { siteRoles, users } from '../src/db/schema.js';
 import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
+import { MockSmsGateway, type SmsGateway } from '../src/sms/gateway.js';
 
 const SESSION_SECRET = 'test-session-secret-placeholder';
 
@@ -39,10 +40,11 @@ function sessionAndCsrf(userId: string): { cookie: string; csrf: string } {
 async function withRunningServer<T>(
   runtime: AuthRuntime,
   fn: (baseUrl: string) => Promise<T>,
+  smsGateway?: SmsGateway,
 ): Promise<T> {
   delete process.env.TLS_CERT_FILE;
   delete process.env.TLS_KEY_FILE;
-  const server = createHttpServer(runtime);
+  const server = createHttpServer(runtime, smsGateway);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
   try {
@@ -104,49 +106,123 @@ test('GET /manager redirects to login without a session; renders the console for
   }
 });
 
-test('POST .../invites sends a manager invite and an authorized_user invite with a limit', async () => {
+test('POST .../invites sends a manager invite and an authorized_user invite with a limit, each with a real SMS', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const { siteId, managerUserId } = await seedManager(db);
     const manager = sessionAndCsrf(managerUserId);
-    await withRunningServer(runtimeFor(db), async (baseUrl) => {
-      const managerInvite = await fetch(`${baseUrl}/manager/sites/${siteId}/invites`, {
-        method: 'POST',
-        headers: formHeaders(manager),
-        body: new URLSearchParams({ phone: '+15550009001', role: 'manager' }).toString(),
-      });
-      assert.equal(managerInvite.status, 200);
-      assert.match(await managerInvite.text(), /Invitation sent/);
+    const smsGateway = new MockSmsGateway();
+    await withRunningServer(
+      runtimeFor(db),
+      async (baseUrl) => {
+        const managerInvite = await fetch(`${baseUrl}/manager/sites/${siteId}/invites`, {
+          method: 'POST',
+          headers: formHeaders(manager),
+          body: new URLSearchParams({ phone: '+15550009001', role: 'manager' }).toString(),
+        });
+        assert.equal(managerInvite.status, 200);
+        assert.match(await managerInvite.text(), /Invitation sent/);
 
-      const userInvite = await fetch(`${baseUrl}/manager/sites/${siteId}/invites`, {
-        method: 'POST',
-        headers: formHeaders(manager),
-        body: new URLSearchParams({
-          phone: '+15550009002',
-          role: 'authorized_user',
-          max_authorization_cents: '3000',
-        }).toString(),
-      });
-      assert.equal(userInvite.status, 200);
-      assert.match(await userInvite.text(), /Invitation sent/);
+        const userInvite = await fetch(`${baseUrl}/manager/sites/${siteId}/invites`, {
+          method: 'POST',
+          headers: formHeaders(manager),
+          body: new URLSearchParams({
+            phone: '+15550009002',
+            role: 'authorized_user',
+            max_authorization_cents: '3000',
+          }).toString(),
+        });
+        assert.equal(userInvite.status, 200);
+        assert.match(await userInvite.text(), /Invitation sent/);
 
-      const rows = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
-      // The seeded manager plus these two new invites.
-      assert.equal(rows.length, 3);
-      const authorizedUserRow = rows.find((r) => r.role === 'authorized_user');
-      assert.equal(authorizedUserRow?.maxAuthorizationCents, 3000);
+        const rows = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+        // The seeded manager plus these two new invites.
+        assert.equal(rows.length, 3);
+        const authorizedUserRow = rows.find((r) => r.role === 'authorized_user');
+        assert.equal(authorizedUserRow?.maxAuthorizationCents, 3000);
 
-      // Same phone again: idempotent no-op (SDD §11.4), no new row.
-      const repeat = await fetch(`${baseUrl}/manager/sites/${siteId}/invites`, {
-        method: 'POST',
-        headers: formHeaders(manager),
-        body: new URLSearchParams({ phone: '+15550009001', role: 'manager' }).toString(),
-      });
-      assert.equal(repeat.status, 200);
-      assert.match(await repeat.text(), /already a member/);
-      const rowsAfter = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
-      assert.equal(rowsAfter.length, 3);
-    });
+        // Both invites actually sent a real SMS through the gateway, to the right phone.
+        assert.equal(smsGateway.sent.length, 2);
+        assert.equal(smsGateway.sent[0]?.phone, '+15550009001');
+        assert.equal(smsGateway.sent[1]?.phone, '+15550009002');
+        assert.match(
+          smsGateway.sent[0]?.message ?? '',
+          /Central Plaza invited you to Restroom Hero/,
+        );
+
+        // Same phone again: idempotent no-op (SDD §11.4), no new row, no new SMS.
+        const repeat = await fetch(`${baseUrl}/manager/sites/${siteId}/invites`, {
+          method: 'POST',
+          headers: formHeaders(manager),
+          body: new URLSearchParams({ phone: '+15550009001', role: 'manager' }).toString(),
+        });
+        assert.equal(repeat.status, 200);
+        assert.match(await repeat.text(), /already a member/);
+        const rowsAfter = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+        assert.equal(rowsAfter.length, 3);
+        assert.equal(smsGateway.sent.length, 2);
+      },
+      smsGateway,
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST .../invites surfaces an SMS send failure without blocking the already-created invite', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, managerUserId } = await seedManager(db);
+    const manager = sessionAndCsrf(managerUserId);
+    const failingGateway: SmsGateway = {
+      send: () => Promise.resolve({ sent: false, error: 'simulated carrier rejection' }),
+    };
+    await withRunningServer(
+      runtimeFor(db),
+      async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/manager/sites/${siteId}/invites`, {
+          method: 'POST',
+          headers: formHeaders(manager),
+          body: new URLSearchParams({ phone: '+15550009001', role: 'manager' }).toString(),
+        });
+        assert.equal(res.status, 200);
+        assert.match(await res.text(), /text message failed to send/);
+        const rows = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+        // The seeded manager plus the persisted (if undelivered) invite.
+        assert.equal(rows.length, 2);
+      },
+      failingGateway,
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST .../invites does not attempt SMS delivery under DEMO_MODE', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, managerUserId } = await seedManager(db);
+    const manager = sessionAndCsrf(managerUserId);
+    const smsGateway = new MockSmsGateway();
+    process.env.DEMO_MODE = '1';
+    try {
+      await withRunningServer(
+        runtimeFor(db),
+        async (baseUrl) => {
+          const res = await fetch(`${baseUrl}/manager/sites/${siteId}/invites`, {
+            method: 'POST',
+            headers: formHeaders(manager),
+            body: new URLSearchParams({ phone: '+15550009001', role: 'manager' }).toString(),
+          });
+          assert.equal(res.status, 200);
+          assert.match(await res.text(), /Invitation sent/);
+        },
+        smsGateway,
+      );
+      assert.equal(smsGateway.sent.length, 0);
+    } finally {
+      delete process.env.DEMO_MODE;
+    }
   } finally {
     await client.close();
   }

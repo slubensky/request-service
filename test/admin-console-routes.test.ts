@@ -15,6 +15,7 @@ import { createSite } from '../src/admin/service.js';
 import { bathrooms, siteRoles, users } from '../src/db/schema.js';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
+import { MockSmsGateway, type SmsGateway } from '../src/sms/gateway.js';
 
 const SESSION_SECRET = 'test-session-secret-placeholder';
 
@@ -37,10 +38,11 @@ function sessionAndCsrf(userId: string): { cookie: string; csrf: string } {
 async function withRunningServer<T>(
   runtime: AuthRuntime,
   fn: (baseUrl: string) => Promise<T>,
+  smsGateway?: SmsGateway,
 ): Promise<T> {
   delete process.env.TLS_CERT_FILE;
   delete process.env.TLS_KEY_FILE;
-  const server = createHttpServer(runtime);
+  const server = createHttpServer(runtime, smsGateway);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
   try {
@@ -117,54 +119,139 @@ test('POST .../bathrooms adds a bathroom; rejects an unknown site with 404', asy
   }
 });
 
-test('POST .../managers sends an invite, then no-ops idempotently on the same phone', async () => {
+test('POST .../managers sends an invite (and a real SMS), then no-ops idempotently on the same phone', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const { siteId, adminId } = await seedAdmin(db);
     const admin = sessionAndCsrf(adminId);
-    await withRunningServer(runtimeFor(db), async (baseUrl) => {
-      const first = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
-        method: 'POST',
-        headers: {
-          cookie: `rs_session=${admin.cookie}`,
-          'x-csrf-token': admin.csrf,
-          'content-type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({ phone: '+15550001234' }).toString(),
-      });
-      assert.equal(first.status, 200);
-      assert.match(await first.text(), /Invitation sent/);
-      const roles = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
-      assert.equal(roles.length, 1);
-      assert.equal(roles[0]?.role, 'manager');
+    const smsGateway = new MockSmsGateway();
+    await withRunningServer(
+      runtimeFor(db),
+      async (baseUrl) => {
+        const first = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
+          method: 'POST',
+          headers: {
+            cookie: `rs_session=${admin.cookie}`,
+            'x-csrf-token': admin.csrf,
+            'content-type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ phone: '+15550001234' }).toString(),
+        });
+        assert.equal(first.status, 200);
+        assert.match(await first.text(), /Invitation sent/);
+        const roles = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+        assert.equal(roles.length, 1);
+        assert.equal(roles[0]?.role, 'manager');
 
-      // Same phone again: idempotent no-op (SDD §11.1), no second SiteRole created.
-      const second = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
-        method: 'POST',
-        headers: {
-          cookie: `rs_session=${admin.cookie}`,
-          'x-csrf-token': admin.csrf,
-          'content-type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({ phone: '+15550001234' }).toString(),
-      });
-      assert.equal(second.status, 200);
-      assert.match(await second.text(), /already a member/);
-      const rolesAfter = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
-      assert.equal(rolesAfter.length, 1);
+        // The invite SMS actually went through the gateway, to the invited phone, naming
+        // the site and Restroom Hero (SDD: real invite delivery, not the old mocked-only
+        // DB write).
+        assert.equal(smsGateway.sent.length, 1);
+        assert.equal(smsGateway.sent[0]?.phone, '+15550001234');
+        assert.match(
+          smsGateway.sent[0]?.message ?? '',
+          /Central Plaza invited you to Restroom Hero/,
+        );
+        assert.match(smsGateway.sent[0]?.message ?? '', /\/auth\/login/);
 
-      // Malformed phone: rejected by parsePhone's format check before any invite is created.
-      const badFormat = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
-        method: 'POST',
-        headers: {
-          cookie: `rs_session=${admin.cookie}`,
-          'x-csrf-token': admin.csrf,
-          'content-type': 'application/x-www-form-urlencoded',
+        // Same phone again: idempotent no-op (SDD §11.1), no second SiteRole created,
+        // and no second SMS sent -- nothing new happened to report.
+        const second = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
+          method: 'POST',
+          headers: {
+            cookie: `rs_session=${admin.cookie}`,
+            'x-csrf-token': admin.csrf,
+            'content-type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ phone: '+15550001234' }).toString(),
+        });
+        assert.equal(second.status, 200);
+        assert.match(await second.text(), /already a member/);
+        const rolesAfter = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+        assert.equal(rolesAfter.length, 1);
+        assert.equal(smsGateway.sent.length, 1);
+
+        // Malformed phone: rejected by parsePhone's format check before any invite is created.
+        const badFormat = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
+          method: 'POST',
+          headers: {
+            cookie: `rs_session=${admin.cookie}`,
+            'x-csrf-token': admin.csrf,
+            'content-type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ phone: 'not-a-phone-number!!' }).toString(),
+        });
+        assert.equal(badFormat.status, 400);
+      },
+      smsGateway,
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST .../managers surfaces an SMS send failure without blocking the already-created invite', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, adminId } = await seedAdmin(db);
+    const admin = sessionAndCsrf(adminId);
+    const failingGateway: SmsGateway = {
+      send: () => Promise.resolve({ sent: false, error: 'simulated carrier rejection' }),
+    };
+    await withRunningServer(
+      runtimeFor(db),
+      async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
+          method: 'POST',
+          headers: {
+            cookie: `rs_session=${admin.cookie}`,
+            'x-csrf-token': admin.csrf,
+            'content-type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ phone: '+15550001234' }).toString(),
+        });
+        assert.equal(res.status, 200);
+        assert.match(await res.text(), /text message failed to send/);
+        // The invite itself is still persisted -- a delivery failure never rolls it back.
+        const roles = await db.select().from(siteRoles).where(eq(siteRoles.siteId, siteId));
+        assert.equal(roles.length, 1);
+      },
+      failingGateway,
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+test('POST .../managers does not attempt SMS delivery under DEMO_MODE', async () => {
+  const { db, client } = await createTestDatabase();
+  try {
+    const { siteId, adminId } = await seedAdmin(db);
+    const admin = sessionAndCsrf(adminId);
+    const smsGateway = new MockSmsGateway();
+    process.env.DEMO_MODE = '1';
+    try {
+      await withRunningServer(
+        runtimeFor(db),
+        async (baseUrl) => {
+          const res = await fetch(`${baseUrl}/admin/sites/${siteId}/managers`, {
+            method: 'POST',
+            headers: {
+              cookie: `rs_session=${admin.cookie}`,
+              'x-csrf-token': admin.csrf,
+              'content-type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({ phone: '+15550001234' }).toString(),
+          });
+          assert.equal(res.status, 200);
+          assert.match(await res.text(), /Invitation sent/);
         },
-        body: new URLSearchParams({ phone: 'not-a-phone-number!!' }).toString(),
-      });
-      assert.equal(badFormat.status, 400);
-    });
+        smsGateway,
+      );
+      assert.equal(smsGateway.sent.length, 0);
+    } finally {
+      delete process.env.DEMO_MODE;
+    }
   } finally {
     await client.close();
   }

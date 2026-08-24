@@ -25,6 +25,44 @@ data "aws_ami" "al2023" {
   }
 }
 
+# Lets the app send invite SMS via SNS (src/sms/sns-gateway.ts) using instance-role
+# credentials -- no access key ever touches this instance or its .env file.
+data "aws_iam_policy_document" "instance_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "instance" {
+  name               = "${var.name_prefix}-host-instance"
+  assume_role_policy = data.aws_iam_policy_document.instance_assume.json
+}
+
+data "aws_iam_policy_document" "instance_sns" {
+  statement {
+    effect    = "Allow"
+    actions   = ["sns:Publish"]
+    resources = ["*"] # SMS publish has no per-number resource ARN to scope to.
+  }
+}
+
+resource "aws_iam_role_policy" "instance_sns" {
+  name   = "${var.name_prefix}-host-sns"
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.instance_sns.json
+}
+
+resource "aws_iam_instance_profile" "this" {
+  name = "${var.name_prefix}-host"
+  role = aws_iam_role.instance.name
+}
+
 resource "aws_security_group" "this" {
   name_prefix = "${var.name_prefix}-"
   description = "Lean test host: SSH from one IP, the app port from anywhere."
@@ -62,6 +100,17 @@ resource "aws_instance" "this" {
   key_name               = var.key_name
   subnet_id              = data.aws_subnets.default.ids[0]
   vpc_security_group_ids = [aws_security_group.this.id]
+  iam_instance_profile   = aws_iam_instance_profile.this.name
+
+  # Default hop limit (1) only reaches IMDS from the instance's own network
+  # namespace -- the app runs inside a Docker container, one bridge-network hop
+  # further out, so the AWS SDK's instance-role credential lookup would
+  # otherwise silently fail (SMS sends would always hit the "no credentials"
+  # branch in src/sms/sns-gateway.ts, never actually reaching SNS).
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
 
   user_data = templatefile("${path.module}/user_data.sh.tpl", {
     public_ip             = var.public_ip
@@ -74,10 +123,13 @@ resource "aws_instance" "this" {
     cognito_issuer        = var.cognito_issuer
     cognito_client_id     = var.cognito_client_id
     cognito_client_secret = var.cognito_client_secret
+    aws_region            = data.aws_region.current.name
   })
 
   tags = { Name = "${var.name_prefix}-host" }
 }
+
+data "aws_region" "current" {}
 
 resource "aws_eip_association" "this" {
   instance_id   = aws_instance.this.id
