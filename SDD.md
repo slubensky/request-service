@@ -755,8 +755,8 @@ succeeding as before, then:
 Root cause: AL2023's minimal AMI does not install `cronie` (the package that
 provides the `crontab` binary) by default -- only `docker` and `git` were
 `dnf install`ed. #033's `crontab -l 2>/dev/null || true` fix correctly
-absorbed the *first* `crontab -l` invocation's failure inside its own
-subshell, but the pipe's *second* `crontab -` invocation (the one that
+absorbed the _first_ `crontab -l` invocation's failure inside its own
+subshell, but the pipe's _second_ `crontab -` invocation (the one that
 actually installs the new cron job) sits outside that subshell with no error
 suppression at all -- "command not found" there is a real, unhandled
 failure under this script's `set -euo pipefail`, aborting the script at the
