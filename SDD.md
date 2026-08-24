@@ -742,6 +742,38 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #022 — 2026-08-24T09:30:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: with the container running
+(#021) and a real Cognito pool created (#020), visiting `/auth/login` on the
+lean EC2 deployment redirected to the Hosted UI domain but Cognito served
+"Login pages unavailable. Please contact an administrator." instead of the
+sign-in page.
+
+Root cause: `infra/lean/main.tf` set the Cognito user pool domain's
+`managed_login_version = 2` -- AWS's newer "Managed Login" experience. That
+version requires branding/style to be explicitly saved at least once (via the
+console, or a separate `aws_cognito_managed_login_branding` resource) before
+its pages actually serve content; nothing in this repo creates that resource.
+The classic Hosted UI (`managed_login_version = 1`) has no such requirement
+and serves immediately from a bare `aws_cognito_user_pool_domain`, which is
+what the lean deployment actually needs -- it exists to exercise real Cognito
+SMS OTP quickly, not to exercise the managed-login branding surface. Fix:
+switched the lean composition to `managed_login_version = 1`. The production
+composition (`infra/main.tf`) is untouched -- it still defaults to version 2
+via `var.cognito_managed_login_version`, which is the right call for a real
+deploy where branding would actually be configured out of band.
+
+Not yet re-confirmed end-to-end against a fresh `terraform apply` + real
+Hosted UI sign-in at the time of this entry; the user was mid-troubleshooting
+against a live pool when the root cause was identified from the domain
+resource's `managed_login_version` argument and Cognito's documented
+behavior for that value.
+
+Validated with `terraform fmt` and `terraform validate` (`infra/lean`,
+real `terraform` binary, `-backend=false`). `npm test`/`lint`/`build`
+unaffected (no `src/` changes).
+
 ### #021 — 2026-08-24T09:00:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: after #020 got the Cognito
