@@ -112,6 +112,15 @@ resource "aws_instance" "this" {
   vpc_security_group_ids = [aws_security_group.this.id]
   iam_instance_profile   = aws_iam_instance_profile.this.name
 
+  # Without this, a user_data change updates the stored attribute but only
+  # stops/starts the existing instance (confirmed against the AWS provider's
+  # actual documented default) -- and cloud-init only runs first-boot user-data
+  # once per instance ID, so a stop/start would never actually re-run the new
+  # script at all. Setting this makes user_data changes force a real
+  # destroy-and-recreate, which is what every prior changelog entry in this
+  # file assumed was already happening.
+  user_data_replace_on_change = true
+
   # Default hop limit (1) only reaches IMDS from the instance's own network
   # namespace -- the app runs inside a Docker container, one bridge-network hop
   # further out, so the AWS SDK's instance-role credential lookup would
