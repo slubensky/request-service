@@ -741,6 +741,51 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #033 — 2026-08-24T23:30:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: with #032's fix, the
+instance finally replaced correctly and the security-group deadlock
+resolved, but the site still showed `ERR_CONNECTION_REFUSED` on port 443.
+Diagnosed over several rounds (an unrelated SSH red herring first: `ssh
+ec2-user@<eip>` was unreachable because `allowed_ssh_cidr` had been
+accidentally set to the instance's own Elastic IP instead of the user's
+actual IP -- a copy-paste mix-up, fixed with a plain in-place `terraform
+apply` of the correct CIDR, no instance impact). Once SSH access was
+restored: `/opt/app/.env` did not exist at all, and `docker-compose ps` -- run
+from the correct directory this time, ruling out the CWD/`.env`-auto-load
+gotcha as a factor -- failed with every variable "not set" and `no port
+specified: 443:<empty>`. `sudo certbot certificates` confirmed Certbot itself
+had succeeded.
+
+Root cause, confirmed by reading `user_data.sh.tpl` in light of where
+execution actually stopped (right after the confirmed-successful Certbot
+step, before `.env` or `docker-compose up` ever ran): the crontab-setup line
+
+    (crontab -l 2>/dev/null; echo "...") | crontab -
+
+fails on every fresh instance, where root has no crontab yet -- `crontab -l`
+exits non-zero, and since it's not last in its `;`-joined subshell sequence,
+the script's own `set -euo pipefail` aborted the whole script right there.
+Confirmed by direct simulation (a standalone script reproducing the same
+`set -euo pipefail` + a stubbed always-failing `crontab -l`) that the old
+line aborts and the fixed one does not, rather than reasoning about bash
+semantics alone -- this exact class of "reasoned but didn't verify" mistake
+already cost real time earlier in this session (#019).
+
+Fix: `crontab -l 2>/dev/null || true` absorbs the expected "no crontab yet"
+failure. Verified via the same `templatefile()`-plus-`bash -n` process as
+#030, plus the standalone simulation above.
+
+Not yet confirmed end-to-end against a fresh apply/boot at the time of this
+entry -- the user will need one more `terraform apply` (another forced
+instance replacement per #032's `user_data_replace_on_change`, another
+database reset, another re-promotion to `company_admin` afterward) to prove
+this was the last blocker in the boot sequence.
+
+Validated with `terraform fmt -check -recursive` and `terraform validate`
+against both compositions (real `terraform` binary, `-backend=false`).
+`npm test`/`lint`/`build` unaffected (no `src/` changes).
+
 ### #032 — 2026-08-24T23:00:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: with #031's apostrophe fix

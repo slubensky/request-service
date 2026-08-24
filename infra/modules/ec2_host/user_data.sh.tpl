@@ -64,8 +64,11 @@ certbot certonly --standalone --non-interactive --agree-tos \
 
 # Certbot's own recommended cadence: renewal only actually happens within
 # ~30 days of expiry, so running this twice a day is a safe no-op the rest
-# of the time.
-(crontab -l 2>/dev/null; echo "0 3,15 * * * /usr/bin/certbot renew --quiet") | crontab -
+# of the time. `crontab -l` exits non-zero when root has no crontab yet --
+# true on every fresh instance -- which under this script's `set -e
+# -o pipefail` aborted the whole script right here, before .env or
+# docker-compose ever ran. `|| true` absorbs that expected failure.
+(crontab -l 2>/dev/null || true; echo "0 3,15 * * * /usr/bin/certbot renew --quiet") | crontab -
 
 cat > .env <<ENV_EOF
 DB_PASSWORD="${db_password}"
