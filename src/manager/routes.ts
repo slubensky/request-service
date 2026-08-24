@@ -40,7 +40,7 @@ import { SiteNotFoundError } from '../admin/service.js';
 import { renderManagerConsole } from '../render/templates/manager.js';
 import { isDemoMode } from '../demo/config.js';
 import { issueDemoInviteCode, unusedCodesForSiteRoles } from '../demo/service.js';
-import { getSitePaymentMethod, DuplicateActiveRequestError } from '../payments/service.js';
+import { getSitePaymentMethod } from '../payments/service.js';
 import {
   approveRequest,
   listPendingApprovalsForSites,
@@ -324,10 +324,7 @@ function registerApproveHandler(
           sendText(c.res, 404, 'Approval request not found');
           return;
         }
-        if (
-          error instanceof InvalidApprovalStateError ||
-          error instanceof DuplicateActiveRequestError
-        ) {
+        if (error instanceof InvalidApprovalStateError) {
           sendText(c.res, 409, error.message);
           return;
         }

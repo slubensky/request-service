@@ -10,7 +10,7 @@
  * any side effect occurs (§7). All queries are parameterized through Drizzle.
  */
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { AppDatabase } from '../db/client.js';
 import { isUniqueViolation } from '../db/access.js';
 import {
@@ -22,18 +22,6 @@ import {
   type SitePaymentMethodRow,
 } from '../db/schema.js';
 import type { PaymentGateway } from './gateway.js';
-
-/** Non-terminal statuses guarded against duplicates (SDD §9.4): a "completed" / "canceled"
- * / "expired" request never blocks a new one for the same bathroom. */
-const ACTIVE_REQUEST_STATUSES = ['authorizing', 'authorized'] as const;
-
-/** Raised when a bathroom already has a non-terminal CleaningRequest (SDD §9.4). */
-export class DuplicateActiveRequestError extends Error {
-  constructor() {
-    super('An active cleaning request already exists for this bathroom');
-    this.name = 'DuplicateActiveRequestError';
-  }
-}
 
 export interface CreateCleaningRequestInput {
   siteId: string;
@@ -50,55 +38,32 @@ export interface CreateCleaningRequestInput {
  * neither row. `price_version` is `1` for every request in this phase -- no
  * price-history mechanism exists yet (SDD §11.6).
  *
- * Rejects with `DuplicateActiveRequestError` -- before any gateway call -- if the bathroom
- * already has a non-terminal request (SDD §9.4). Checked first for a clean, fast rejection
- * in the common case; the partial unique index `cleaning_requests_bathroom_active_key`
- * backstops the true double-tap race, and a resulting unique-violation on insert is mapped
- * to the same error rather than left to surface as an unhandled 500.
+ * A bathroom may have any number of simultaneous non-terminal requests (SDD
+ * §9.4 -- the earlier one-active-request-per-bathroom guard was removed by
+ * explicit product decision); each is its own CleaningRequest/
+ * PaymentAuthorization pair, independently captured or canceled.
  */
 export async function createCleaningRequest(
   db: AppDatabase,
   gateway: PaymentGateway,
   input: CreateCleaningRequestInput,
 ): Promise<{ request: CleaningRequestRow; authorization: PaymentAuthorizationRow }> {
-  const [existingActive] = await db
-    .select({ id: cleaningRequests.id })
-    .from(cleaningRequests)
-    .where(
-      and(
-        eq(cleaningRequests.bathroomId, input.bathroomId),
-        inArray(cleaningRequests.status, ACTIVE_REQUEST_STATUSES),
-      ),
-    )
-    .limit(1);
-  if (existingActive) {
-    throw new DuplicateActiveRequestError();
-  }
-
   const authorized = await gateway.authorize({
     amountCents: input.amountCents,
     idempotencyKey: randomUUID(),
   });
 
-  let request: CleaningRequestRow | undefined;
-  try {
-    [request] = await db
-      .insert(cleaningRequests)
-      .values({
-        siteId: input.siteId,
-        bathroomId: input.bathroomId,
-        requestedByUserId: input.requestedByUserId,
-        priceVersion: 1,
-        amountCents: input.amountCents,
-        status: 'authorized',
-      })
-      .returning();
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      throw new DuplicateActiveRequestError();
-    }
-    throw error;
-  }
+  const [request] = await db
+    .insert(cleaningRequests)
+    .values({
+      siteId: input.siteId,
+      bathroomId: input.bathroomId,
+      requestedByUserId: input.requestedByUserId,
+      priceVersion: 1,
+      amountCents: input.amountCents,
+      status: 'authorized',
+    })
+    .returning();
   if (!request) {
     throw new Error('Failed to create cleaning request');
   }
@@ -242,8 +207,8 @@ export async function getSitePaymentMethod(
  * never be mistaken for a real Stripe payment-method id -- there is no free-text PAN/CVV/
  * expiry field anywhere in this flow. Rejects with `SitePaymentMethodAlreadyExistsError` if
  * the site already has one (no silent overwrite, no parallel create path); the unique index
- * on `site_id` backstops a concurrent double-add the same way the duplicate-active-request
- * guard above backstops its own race.
+ * on `site_id` backstops a true double-add race the pre-check above can't fully close on its
+ * own (`isUniqueViolation` maps the resulting conflict to the same error, not an unhandled 500).
  */
 export async function saveSitePaymentMethod(
   db: AppDatabase,

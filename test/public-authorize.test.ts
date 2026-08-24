@@ -443,7 +443,7 @@ test('POST /s/:token/authorize is rejected 401 (step-up required) when the sessi
   }
 });
 
-test('POST /s/:token/authorize rejects a double-tap: the second concurrent attempt is a clean 409, not a 500 (SDD §9.4)', async () => {
+test('POST /s/:token/authorize allows a concurrent double-tap: both attempts succeed as independent requests (SDD §9.4)', async () => {
   const { db, client } = await createTestDatabase();
   try {
     const { rawToken, siteId } = await seedSiteAndToken(db, 4500);
@@ -465,11 +465,13 @@ test('POST /s/:token/authorize rejects a double-tap: the second concurrent attem
           headers: { cookie: `rs_session=${cookie}`, 'x-csrf-token': csrf },
         });
       const [first, second] = await Promise.all([authorize(), authorize()]);
-      const statuses = [first.status, second.status].sort();
-      assert.deepEqual(statuses, [200, 409]);
+      assert.equal(first.status, 200);
+      assert.equal(second.status, 200);
     });
 
-    assert.equal((await db.select().from(cleaningRequests)).length, 1);
+    // Both attempts persisted as independent CleaningRequest rows -- no
+    // per-bathroom cap (removed by explicit product decision, SDD §9.4).
+    assert.equal((await db.select().from(cleaningRequests)).length, 2);
   } finally {
     await client.close();
   }

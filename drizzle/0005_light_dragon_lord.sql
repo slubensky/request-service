@@ -1,0 +1,1 @@
+DROP INDEX "cleaning_requests_bathroom_active_key";
