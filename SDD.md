@@ -742,6 +742,37 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #024 — 2026-08-24T11:00:00-04:00
+
+**Docs (deployment, no product-facing change)**: with sign-in reaching the
+real SMS OTP choice screen (#023), the OTP itself never arrived. The lean
+deployment's `infra/README.md` prerequisites section only warned about the
+SNS SMS sandbox (`IsInSandbox`) -- but the user's account already showed
+`IsInSandbox: false`, so that check alone was insufficient and gave false
+confidence. Confirmed against a real deploy: even outside the sandbox, AWS
+requires a registered origination identity (toll-free number or 10DLC long
+code) for any application-to-person SMS to US destinations -- without one,
+sends fail silently with no error surfaced anywhere in Cognito, SNS, or the
+app.
+
+Expanded the "Prerequisites" section with the actual check (`describe-phone-
+numbers` / `describe-sender-ids` via `pinpoint-sms-voice-v2`) and the fix
+(request + register a toll-free number). Deliberately did not attempt to
+script the registration submission itself via CLI: it requires a guided,
+use-case-specific form (sample message text, opt-in/opt-out language,
+sometimes business verification), and getting a field wrong risks an outright
+rejection -- costing a full re-review cycle. Also corrected an initial,
+wrong estimate given verbally (~1 business day) with AWS's actual documented
+timeline: **up to 15 business days** for toll-free registration approval.
+Per explicit user choice (asked via AskUserQuestion, 3 options: start
+registration and wait / use SMS-sandbox-verified testing instead / stop
+here for now), proceeding with registration and accepting the wait rather
+than working around it.
+
+No `terraform`/`src/` changes -- documentation only. `npm run lint` run
+(prettier covers `infra/README.md` and `SDD.md`); `npm test`/`build`
+unaffected.
+
 ### #023 — 2026-08-24T10:15:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: #022's fix was wrong. It

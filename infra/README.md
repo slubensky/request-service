@@ -121,11 +121,22 @@ will show a one-time security warning the first time you visit — click through
 
 ### Prerequisites
 
-- **Check SNS SMS sandbox status first.** New AWS accounts default to SMS
-  _sandbox_ mode, which only delivers to phone numbers you've pre-verified in the
-  SNS/Pinpoint console. If you're still in sandbox, verify your test number there
-  (or request production access) before testing — otherwise the OTP silently never
-  arrives.
+- **Check SNS SMS sandbox status first**: `aws sns get-sms-sandbox-account-status
+--region us-east-1`. If `IsInSandbox` is `true`, SNS/Cognito only delivers to
+  phone numbers you've pre-verified (`aws sns create-sms-sandbox-phone-number` /
+  `verify-sms-sandbox-phone-number`) — otherwise the OTP silently never arrives.
+- **Even with `IsInSandbox: false`, US destinations still need a registered
+  origination identity** (confirmed against a real deploy) — AWS requires this
+  for all A2P SMS to US numbers, sandboxed or not. Check for an existing one:
+  `aws pinpoint-sms-voice-v2 describe-phone-numbers --region us-east-1` and
+  `describe-sender-ids`. If both are empty, request a toll-free number
+  (`aws pinpoint-sms-voice-v2 request-phone-number --iso-country-code US
+--message-type TRANSACTIONAL --number-capabilities SMS --number-type
+TOLL_FREE`) and complete its registration via the AWS Console (End User
+  Messaging → Phone numbers → Register, use case "One-time passwords") — the
+  registration form needs a guided submission, not raw CLI, to avoid a
+  rejection. **Budget up to 15 business days for approval**; this is not a
+  same-day unblock, so start it well before you plan to demo SMS OTP.
 - Create or import an EC2 key pair in the AWS console (for optional SSH access;
   the deployment itself doesn't need you to SSH in — user-data does everything).
 
