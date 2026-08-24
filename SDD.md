@@ -741,6 +741,37 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #034 — 2026-08-25T00:00:00-04:00
+
+**Bugfix (deployment, no product-facing change)**: #033's fix was necessary
+but not sufficient. The user's next real `terraform apply` did force a fresh
+instance replacement (confirmed: user-data actually ran on a new instance
+this time), but `.env` still didn't exist and `docker-compose ps` failed the
+same way. `/var/log/cloud-init-output.log` this time showed Certbot
+succeeding as before, then:
+
+    /var/lib/cloud/instance/scripts/part-001: line 71: crontab: command not found
+
+Root cause: AL2023's minimal AMI does not install `cronie` (the package that
+provides the `crontab` binary) by default -- only `docker` and `git` were
+`dnf install`ed. #033's `crontab -l 2>/dev/null || true` fix correctly
+absorbed the _first_ `crontab -l` invocation's failure inside its own
+subshell, but the pipe's _second_ `crontab -` invocation (the one that
+actually installs the new cron job) sits outside that subshell with no error
+suppression at all -- "command not found" there is a real, unhandled
+failure under this script's `set -euo pipefail`, aborting the script at the
+same spot as #033's bug, just one step later.
+
+Fix: `dnf install -y docker git cronie` plus `systemctl enable --now crond`,
+added right after the initial `dnf update -y`. Verified via the same
+`templatefile()`-plus-`bash -n` render process as #030/#033; `terraform fmt
+-check -recursive` and `terraform validate` against both compositions.
+
+Not yet confirmed end-to-end against a fresh apply/boot at the time of this
+entry -- same caveat as #033 (another forced instance replacement, database
+reset, and re-promotion to `company_admin` needed to prove this was actually
+the last blocker).
+
 ### #033 — 2026-08-24T23:30:00-04:00
 
 **Bugfix (deployment, no product-facing change)**: with #032's fix, the

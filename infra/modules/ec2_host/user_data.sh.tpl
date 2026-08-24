@@ -4,7 +4,11 @@
 set -euo pipefail
 
 dnf update -y
-dnf install -y docker git
+# cronie provides `crontab` -- AL2023's minimal AMI doesn't install it by
+# default (confirmed against a real deploy: `crontab: command not found`
+# aborted this script under set -e, right before .env was ever written).
+dnf install -y docker git cronie
+systemctl enable --now crond
 
 systemctl enable --now docker
 
