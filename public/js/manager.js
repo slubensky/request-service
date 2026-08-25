@@ -3,13 +3,17 @@
 // submissions and replays them via fetch so the session-bound CSRF token can
 // travel in the `x-csrf-token` header (HTML forms cannot set headers).
 
+import { combinePhoneFields } from './phone-field.js';
+
 function csrfToken() {
   const meta = document.querySelector('meta[name="csrf-token"]');
   return meta ? meta.getAttribute('content') : '';
 }
 
 async function submitForm(form) {
-  const body = new URLSearchParams(new FormData(form)).toString();
+  const formData = new FormData(form);
+  combinePhoneFields(formData);
+  const body = new URLSearchParams(formData).toString();
   const response = await fetch(form.action, {
     method: 'POST',
     headers: {

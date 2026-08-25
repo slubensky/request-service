@@ -9,6 +9,7 @@
 import { escapeHtml } from '../escape.js';
 import { renderLayout } from './layout.js';
 import { renderDemoInviteCode } from './demo-invite-code.js';
+import { renderPhoneField } from './phone-field.js';
 import { formatCents } from './confirm.js';
 import type { SiteWithBathrooms } from '../../admin/service.js';
 import type { SiteRoleRow } from '../../db/schema.js';
@@ -128,9 +129,7 @@ function renderSite(entry: SiteWithBathrooms, demoCodes: ReadonlyMap<string, str
           <button type="submit">Add bathroom</button>
         </form>
         <form class="stack-form" method="post" action="${escapeHtml(managerAction)}" data-admin-form>
-          <label>Invite initial manager (phone)
-            <input name="phone" required maxlength="32" inputmode="tel" autocomplete="off" />
-          </label>
+          ${renderPhoneField('Invite initial manager (phone)')}
           <button type="submit">Invite manager</button>
         </form>
       </section>`;

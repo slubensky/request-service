@@ -9,6 +9,7 @@
 import { escapeHtml } from '../escape.js';
 import { renderLayout } from './layout.js';
 import { renderDemoInviteCode } from './demo-invite-code.js';
+import { renderPhoneField } from './phone-field.js';
 import { formatCents } from './confirm.js';
 import type { ManagedSite } from '../../manager/service.js';
 import type { PendingApprovalView } from '../../payments/approvals.js';
@@ -102,9 +103,7 @@ function renderManagedSite(
         <ul class="approvals">${approvalsHtml}</ul>
         <h4>Invite a member</h4>
         <form class="stack-form" method="post" action="${escapeHtml(inviteAction)}" data-manager-form>
-          <label>Phone
-            <input name="phone" required maxlength="32" inputmode="tel" autocomplete="off" />
-          </label>
+          ${renderPhoneField('Phone')}
           <label>Role
             <select name="role" required>
               <option value="authorized_user">Authorized user</option>

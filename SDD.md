@@ -741,7 +741,32 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
-### #034 — 2026-08-25T00:00:00-04:00
+### #035 — 2026-08-25T09:00:00-04:00
+
+**Feature (§11.1, §11.4 invite forms)**: the manager/admin console invite
+forms' plain `<input name="phone">` let an operator type a national number
+with no `+` country code (e.g. `5551234567` instead of `+15551234567`).
+`parsePhone` (`src/server/validation.ts`) accepts that shape -- its regex
+only checks for digits/`+`/`()`/`-`/spaces, not a leading `+` -- so the
+invite is created, but the resulting SMS send to SNS/Cognito fails silently
+(confirmed against the real deployment stood up this session): neither
+service will infer a country code for a bare national number.
+
+Fix: split the single phone input into a country-code `<select>` (a short
+list of common codes, defaulting to `+1`) plus a national-number `<input>`,
+mirroring Cognito's own Hosted UI sign-in field. New shared fragment
+`src/render/templates/phone-field.ts` (`renderPhoneField`), used by both
+`admin.ts`'s initial-manager-invite form and `manager.ts`'s site-member
+invite form. `public/js/phone-field.js`'s `combinePhoneFields` (imported by
+both `admin.js` and `manager.js`) recombines `phone_country` +
+`phone_number` into a single `phone` field client-side before the existing
+fetch-based form submission, so the server-side route/validation code
+(`parsePhone`, `inviteInitialManager`, `inviteSiteMember`) is unchanged --
+it now just always receives a real `+`-prefixed number instead of trusting
+the operator to type one.
+
+`npm run lint` / `npm run build` / `npm test` (218 passing, unchanged count
+-- no template-markup assertions needed updating).
 
 **Bugfix (deployment, no product-facing change)**: #033's fix was necessary
 but not sufficient. The user's next real `terraform apply` did force a fresh
