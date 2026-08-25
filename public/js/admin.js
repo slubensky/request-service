@@ -4,13 +4,17 @@
 // header (HTML forms cannot set headers). This script is required only for the
 // internal admin console; the public visitor page loads no JS at all.
 
+import { combinePhoneFields } from './phone-field.js';
+
 function csrfToken() {
   const meta = document.querySelector('meta[name="csrf-token"]');
   return meta ? meta.getAttribute('content') : '';
 }
 
 async function submitForm(form) {
-  const body = new URLSearchParams(new FormData(form)).toString();
+  const formData = new FormData(form);
+  combinePhoneFields(formData);
+  const body = new URLSearchParams(formData).toString();
   const response = await fetch(form.action, {
     method: 'POST',
     headers: {
