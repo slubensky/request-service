@@ -1,9 +1,8 @@
-# Lean test deployment (infra/lean, SDD.md changelog #017): the whole app on
-# one host -- Postgres plus the SSR container -- against a real AWS Cognito
-# user pool for SMS OTP. Not used by the production path (infra/main.tf),
-# which targets App Runner + Aurora instead. Values come from a `.env` file
-# in this directory (docker compose loads it automatically); infra/lean's
-# EC2 user-data writes that file on first boot.
+# Lean deployment (infra/lean, SDD.md changelog #017): the whole app on one
+# host -- Postgres plus the SSR container -- against a real AWS Cognito user
+# pool for SMS OTP. Values come from a `.env` file in this directory (docker
+# compose loads it automatically); infra/lean's EC2 user-data writes that
+# file on first boot.
 services:
   db:
     image: postgres:16

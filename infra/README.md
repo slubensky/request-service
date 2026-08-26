@@ -1,146 +1,42 @@
 # Infra — AWS Terraform (request-service)
 
 Terraform for the QR Bathroom Cleaning Service Request App, per `ARCHITECTURE.md`
-and the approved Blueprint (art_RUHUe0PF). Everything runs in **us-east-1** and is
-a single-deployable modular monolith: one App Runner service backed by Aurora
-Serverless v2 PostgreSQL, with Amazon Cognito for authentication and Secrets
-Manager for application secrets.
+and the approved Blueprint (art_RUHUe0PF). Everything runs in **us-east-1**.
 
-> **Scope of this PR: author only.** No `terraform apply`, no provisioning. The
-> config is credential-free and passes `terraform fmt -check` and
-> `terraform validate` in CI (`terraform init -backend=false`). AWS provisioning
-> is separately, explicitly human-gated.
+The only composition is `infra/lean/`: one EC2 instance running Postgres + the
+app via docker-compose, plus a real Amazon Cognito user pool
+(`modules/cognito`) for authentication. An earlier App Runner + Aurora
+Serverless "production" composition was authored but never `terraform
+apply`'d against real AWS, and was removed (SDD.md changelog #036) once
+`infra/lean/` became the one actually deployed, tested, and fixed against
+real AWS -- carrying an unverified second composition in sync added cost
+with no corresponding confidence. If a larger-scale target is needed again
+later, it's recoverable from git history.
 
 ## Layout
 
-| Path                                        | Purpose                                                                        |
-| ------------------------------------------- | ------------------------------------------------------------------------------ |
-| `versions.tf`                               | Terraform + provider version pins; partial S3 backend.                         |
-| `main.tf`                                   | Provider config and module composition.                                        |
-| `variables.tf` / `outputs.tf` / `locals.tf` | Root inputs, outputs, name prefix.                                             |
-| `modules/network`                           | VPC, public/private subnets, NAT, app + Aurora security groups.                |
-| `modules/database`                          | Aurora Serverless v2 cluster, DB subnet group (RDS-managed credentials).       |
-| `modules/cognito`                           | User pool, managed-login domain, app client, SMS/passkey config, SMS IAM role. |
-| `modules/secrets`                           | Secrets Manager containers for Cognito + Stripe secrets.                       |
-| `modules/app_runner`                        | App Runner service, VPC connector, autoscaling, IAM roles.                     |
-| `modules/dns`                               | Optional custom-domain association + Route53/ACM wiring.                       |
+| Path               | Purpose                                                                        |
+| ------------------ | ------------------------------------------------------------------------------ |
+| `lean/`            | The deployment: provider config, EC2 host, Elastic IP, Cognito module wiring.  |
+| `modules/cognito`  | User pool, managed-login domain, app client, SMS/passkey config, SMS IAM role. |
+| `modules/ec2_host` | The EC2 instance, security group, IAM instance role, first-boot user-data.     |
 
 ## Local validation
 
 ```sh
 cd infra
 terraform fmt -check -recursive
+cd lean
 terraform init -backend=false
 terraform validate
 ```
 
-`-backend=false` skips backend init (the `s3` backend is an empty partial
-configuration), so this never contacts AWS and needs no credentials.
+Validation needs no variable values and no AWS credentials.
 
-## Deploy-time inputs (no defaults / must be set for a real deploy)
+## Deploy
 
-Validation needs **no** variables. A real (human-gated) deploy requires:
-
-| Variable                                        | Description                                                   |
-| ----------------------------------------------- | ------------------------------------------------------------- |
-| `container_image_identifier`                    | ECR image URI for the SSR container.                          |
-| `cognito_callback_urls` / `cognito_logout_urls` | OAuth callback/logout URLs for the app client.                |
-| `webauthn_relying_party_id`                     | Registrable domain passkeys bind to (e.g. `app.example.com`). |
-| `cognito_domain_prefix`                         | Managed-login (Hosted UI) domain prefix (globally unique).    |
-
-**Required one-time step, every fresh pool:** the same manual
-`create-managed-login-branding` step documented under "Lean test deployment"
-below applies here too — Terraform cannot yet create it (needs AWS provider
-v6.12+; this repo is pinned to `~> 5.0`), and without it `/login` shows
-"Login pages unavailable" instead of the sign-in page. Run once after apply,
-using this composition's own `cognito_user_pool_id` / `cognito_user_pool_client_id`
-outputs.
-
-Optional custom domain:
-
-| Variable                 | Description                                                           |
-| ------------------------ | --------------------------------------------------------------------- |
-| `custom_domain`          | Custom domain for App Runner; empty disables all DNS/ACM wiring.      |
-| `route53_zone_id`        | Hosted zone that owns `custom_domain`.                                |
-| `create_acm_certificate` | Also create a standalone DNS-validated ACM cert for CDN/ALB fronting. |
-
-Tunable defaults (region-locked to `us-east-1`, low-cost Aurora ACUs, etc.) are
-documented inline in `variables.tf`.
-
-## Secrets — never committed
-
-No secret value is ever hardcoded or stored in Terraform:
-
-- **DB credentials** — RDS generates and manages them via `manage_master_user_password`;
-  the ARN is exported as `aurora_master_user_secret_arn`.
-- **Cognito app client secret** — generated by Cognito, stored in a Secrets Manager
-  container by the `secrets` module.
-- **Stripe keys** (`stripe_secret_key`, `stripe_webhook_secret`) — optional sensitive
-  variables. Left empty, only the Secrets Manager _container_ is created; the real
-  value is set out of band (CLI/console). App Runner reads all secrets at runtime via
-  a least-privilege instance role.
-
-## Invite SMS delivery
-
-Inviting a manager or authorized user (SDD §11.1, §11.4) sends a real text via
-Amazon SNS (`src/sms/sns-gateway.ts`) -- the same account/region mechanism
-Cognito's own SMS OTP already uses, not a separate service. Both compositions
-grant their instance/task role `sns:Publish` (`modules/app_runner`'s
-`instance` role here; `modules/ec2_host`'s own `instance` role in the lean
-deployment) -- no access key ever enters an env file or Secrets Manager for
-this. The same SNS sandbox / origination-identity prerequisites documented
-under "Lean test deployment" below apply here too: without a registered
-origination identity, invite texts fail silently exactly like OTP codes did.
-
-A send failure never blocks or rolls back the invite itself (it's still
-created, and the console/log surfaces the failure) -- see `src/sms/gateway.ts`.
-
-## Backend
-
-`terraform init` for a real deploy needs backend config supplied out of band, e.g.:
-
-```sh
-terraform init \
-  -backend-config="bucket=<state-bucket>" \
-  -backend-config="key=request-service/prod.tfstate" \
-  -backend-config="region=us-east-1" \
-  -backend-config="dynamodb_table=<lock-table>"
-```
-
-## Network / connectivity notes
-
-- App Runner egress is routed through a VPC connector into the private subnets so
-  the service reaches Aurora privately; a single NAT gateway provides outbound
-  internet (Cognito, Stripe). NAT is the main standing cost — consolidate or add
-  VPC endpoints if tightening cost later.
-- The Aurora security group accepts PostgreSQL **only** from the app security group
-  (deny by default).
-
-## Lean test deployment (`infra/lean/`)
-
-A separate, throwaway composition for testing real Cognito SMS OTP without the
-production stack's cost: one EC2 instance running Postgres + the app via
-docker-compose, plus a real Cognito user pool (the same `modules/cognito` the
-production composition uses, unchanged). No Aurora, no App Runner, no NAT/VPC
-connector, no Route53/ACM, no Secrets Manager. Uses **local state** (not the
-shared S3 backend) since it's meant to be stood up and torn down freely — never
-`terraform apply` it against the same backend as `../main.tf`. Not validated by
-CI's `terraform validate` step (that runs against `infra/` only), though `terraform
-fmt -check -recursive` does cover it since CI runs recursively from `infra/`.
-
-A real domain (`domain_name`) backs this deployment, so both SMS OTP and
-WebAuthn/passkey enrollment work against it, and the app terminates TLS with a
-real, browser-trusted Let's Encrypt certificate (Certbot, run by the instance's
-own user-data) — no self-signed-cert warning to click through.
-
-**Test with a real mobile carrier number, not Google Voice** (confirmed against a
-real deploy): this app's own invite SMS (a plain informational text) delivers to
-a Google Voice number fine, but Cognito's own sign-in OTP does not -- many
-providers, AWS included, deliberately restrict OTP/verification-code delivery to
-VoIP numbers like Google Voice as an anti-fraud policy, since they can't be tied
-to verified phone-ownership history the way a carrier SIM can. This fails the
-same way for any Cognito deployment, not just this one -- there is no Terraform/
-Cognito config that fixes it.
+Uses **local state** (no shared backend) since this is meant to be stood up
+and torn down freely.
 
 ### Prerequisites
 
@@ -164,11 +60,21 @@ TOLL_FREE`) and complete its registration via the AWS Console (End User
   the deployment itself doesn't need you to SSH in — user-data does everything).
 - **A domain or subdomain you control**, with its DNS hosted somewhere you can add
   an `A` record manually (this repo doesn't manage third-party DNS with
-  Terraform). You'll point it at this deployment's Elastic IP — see "Deploy"
-  below for the exact sequencing; it must already resolve there **before** you
-  apply, or Let's Encrypt's domain-ownership check at first boot fails.
+  Terraform). You'll point it at this deployment's Elastic IP — see "Deploy
+  steps" below for the exact sequencing; it must already resolve there
+  **before** you apply, or Let's Encrypt's domain-ownership check at first
+  boot fails.
 
-### Deploy
+**Test with a real mobile carrier number, not Google Voice** (confirmed against a
+real deploy): this app's own invite SMS (a plain informational text) delivers to
+a Google Voice number fine, but Cognito's own sign-in OTP does not -- many
+providers, AWS included, deliberately restrict OTP/verification-code delivery to
+VoIP numbers like Google Voice as an anti-fraud policy, since they can't be tied
+to verified phone-ownership history the way a carrier SIM can. This fails the
+same way for any Cognito deployment, not just this one -- there is no Terraform/
+Cognito config that fixes it.
+
+### Deploy steps
 
 Elastic IPs in this composition are allocated independently of the instance
 (`aws_eip.app`), so you can get a stable IP to point DNS at **before** creating
@@ -243,3 +149,26 @@ terraform destroy
 ```
 
 No `deletion_protection` or similar blocks this — everything here is disposable.
+
+## Secrets — never committed
+
+No secret value is ever hardcoded or stored in Terraform: `db_password` and
+`session_secret` are Terraform-generated (`random_password`/`random_id`) and
+written directly into the instance's `.env` file by user-data at first boot,
+never into state as a separate secret store. The Cognito app client secret
+is generated by Cognito and passed the same way. No access key ever enters
+the instance: SNS publish (invite SMS) and Cognito's own SMS OTP both use the
+instance/Cognito service role's credentials via the default AWS SDK provider
+chain.
+
+## Invite SMS delivery
+
+Inviting a manager or authorized user (SDD §11.1, §11.4) sends a real text via
+Amazon SNS (`src/sms/sns-gateway.ts`) -- the same account/region mechanism
+Cognito's own SMS OTP already sends through. `modules/ec2_host`'s instance
+role and `modules/cognito`'s SMS role both grant `sns:Publish` -- no access
+key ever enters an env file for this. See "Prerequisites" above for the SNS
+sandbox / origination-identity requirements this needs.
+
+A send failure never blocks or rolls back the invite itself (it's still
+created, and the console/log surfaces the failure) -- see `src/sms/gateway.ts`.

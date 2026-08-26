@@ -741,6 +741,40 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #036 — 2026-08-26T11:00:00-04:00
+
+**Simplification (infra, no product-facing change)**: removed the unapplied
+"production" Terraform composition (`infra/main.tf`, `variables.tf`,
+`outputs.tf`, `locals.tf`, `versions.tf`, and `modules/{network,database,
+secrets,app_runner,dns}` -- roughly 1,070 of the repo's ~1,815 Terraform
+lines), keeping only `infra/lean/` and the shared `modules/{cognito,
+ec2_host}`. By explicit user request, following a broader repo-wide
+complexity-reduction review (4 parallel research agents covering app code,
+tests, infra, and docs).
+
+This composition was never `terraform apply`'d against real AWS -- only
+`terraform validate` in CI, which checks syntax/types, not whether AWS
+actually accepts the config. Every real Cognito bug found and fixed this
+session (`mfa_configuration` defaulting to `OFF` per #020, missing `PASSWORD`
+in `allowed_first_auth_factors`, Managed Login v2 branding) was discovered
+exclusively by applying `infra/lean/`; the fixes land in the shared
+`modules/cognito` and silently applied to this composition too, but nothing
+ever confirmed they actually worked there. It was unverified even for bugs
+already found once -- a false sense of safety, not real coverage. If a
+larger-scale target (App Runner/Aurora) is needed again later, the deleted
+composition is recoverable from git history.
+
+Updated `.github/workflows/ci.yml`'s `terraform-validate` job to validate
+`infra/lean/` (the only composition left) instead of the now-deleted root;
+`terraform fmt -check -recursive` still runs from `infra/` and covers the
+whole tree. Rewrote `infra/README.md` to document only the lean deployment.
+Updated two stale comments referencing the deleted composition
+(`docker-compose.yml`, `src/sms/sns-gateway.ts`).
+
+Verified: `terraform fmt -check -recursive` and `terraform validate` (real
+binary, against `infra/lean/`) both clean; `npm run lint` / `npm run build`
+unaffected (no `src/` behavior change, only comments).
+
 ### #035 — 2026-08-25T09:00:00-04:00
 
 **Feature (§11.1, §11.4 invite forms)**: the manager/admin console invite
