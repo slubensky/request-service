@@ -741,6 +741,32 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #039 — 2026-08-26T14:00:00-04:00
+
+**Simplification (test suite, no product-facing change)**: fourth and final
+step of the same complexity-reduction pass as #036-#038. The
+`runtimeFor`/`sessionAndCsrf`/`withRunningServer` trio (a PGlite-backed
+`AuthRuntime`, a signed session cookie + its derived CSRF token, and a
+listen/run/close wrapper around `createHttpServer`) was copy-pasted
+near-verbatim across 8 integration test files (`admin-authorized-users`,
+`admin-console-routes`, `admin-payments`, `admin-qr-scheme`, `approvals`,
+`csrf-enforcement`, `manager-console-routes`, `public-authorize`) --
+byte-identical except `sessionAndCsrf`'s optional `nowSeconds` param (used
+by `public-authorize` for step-up-recency tests) and `withRunningServer`'s
+optional `smsGateway` param + TLS-env-clearing (used by the two invite-SMS
+route tests), both strict supersets safe to fold into one shared shape.
+
+Extracted to new `test/helpers/http.ts`, alongside the existing
+`test/helpers/pglite.ts`. `admin-qr-scheme.test.ts` drives its own inline
+server (HTTP + HTTPS variants) rather than using `withRunningServer`, so it
+only imports `runtimeFor`/`sessionAndCsrf`. Net -308 lines across the 8
+files (+51 for the new shared module).
+
+Verified: `npm run lint` / `npx tsc --noEmit` (no new errors in any touched
+file -- 3 pre-existing errors in untouched `src/demo/routes.ts` and
+`test/payments.test.ts` are unrelated to this change) / `npm run build` /
+`npm test` (218 passing, unmodified -- confirms behavior-preserving).
+
 ### #038 — 2026-08-26T13:00:00-04:00
 
 **Simplification (docs, no product-facing/spec behavior change)**: third

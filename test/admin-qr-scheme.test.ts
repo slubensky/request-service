@@ -15,35 +15,15 @@ import type { AddressInfo } from 'node:net';
 import { request as httpsRequest } from 'node:https';
 import { createHttpServer } from '../src/server/app.js';
 import type { AuthRuntime } from '../src/auth/config.js';
-import type { PgConnection } from '../src/db/client.js';
-import { csrfTokenForSession } from '../src/auth/csrf.js';
-import { signSession } from '../src/auth/session.js';
 import { addBathroom, createSite } from '../src/admin/service.js';
 import { users } from '../src/db/schema.js';
 import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
+import { runtimeFor, sessionAndCsrf } from './helpers/http.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const certFile = path.join(currentDir, 'fixtures/tls/test-cert.pem');
 const keyFile = path.join(currentDir, 'fixtures/tls/test-key.pem');
 const caCert = readFileSync(certFile, 'utf8');
-
-const SESSION_SECRET = 'test-session-secret-placeholder';
-
-function runtimeFor(db: TestDatabase['db']): AuthRuntime {
-  return {
-    cognito: null,
-    sessionSecret: SESSION_SECRET,
-    connection: { db, pool: undefined } as unknown as PgConnection,
-    jwksFor: () => {
-      throw new Error('jwks must not be resolved by these routes');
-    },
-  };
-}
-
-function sessionAndCsrf(userId: string): { cookie: string; csrf: string } {
-  const token = signSession({ userId, sub: `sub-${userId}` }, SESSION_SECRET);
-  return { cookie: token, csrf: csrfTokenForSession(token, SESSION_SECRET) };
-}
 
 async function seed(db: TestDatabase['db']) {
   const site = await createSite(db, {

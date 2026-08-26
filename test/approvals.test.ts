@@ -6,13 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { AddressInfo } from 'node:net';
 import { eq } from 'drizzle-orm';
-import { createHttpServer } from '../src/server/app.js';
-import type { AuthRuntime } from '../src/auth/config.js';
-import type { PgConnection } from '../src/db/client.js';
-import { csrfTokenForSession } from '../src/auth/csrf.js';
-import { signSession } from '../src/auth/session.js';
 import { createSite, addBathroom, issueQrToken } from '../src/admin/service.js';
 import { saveSitePaymentMethod } from '../src/payments/service.js';
 import {
@@ -27,8 +21,7 @@ import {
 import { MockPaymentGateway } from '../src/payments/gateway.js';
 import { cleaningRequests, requestApprovals, siteRoles, sites, users } from '../src/db/schema.js';
 import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
-
-const SESSION_SECRET = 'test-session-secret-placeholder';
+import { runtimeFor, sessionAndCsrf, withRunningServer } from './helpers/http.js';
 
 async function insertUser(
   db: TestDatabase['db'],
@@ -202,39 +195,6 @@ test('loadRequestApproval throws for an unknown id', async () => {
 });
 
 // --- Real-HTTP end-to-end: over-limit request -> approval -> manager grant -> hold ---
-
-function runtimeFor(db: TestDatabase['db']): AuthRuntime {
-  return {
-    cognito: null,
-    sessionSecret: SESSION_SECRET,
-    connection: { db, pool: undefined } as unknown as PgConnection,
-    jwksFor: () => {
-      throw new Error('jwks must not be resolved by these routes');
-    },
-  };
-}
-
-function sessionAndCsrf(userId: string): { cookie: string; csrf: string } {
-  const token = signSession({ userId, sub: `sub-${userId}` }, SESSION_SECRET);
-  return { cookie: token, csrf: csrfTokenForSession(token, SESSION_SECRET) };
-}
-
-async function withRunningServer<T>(
-  runtime: AuthRuntime,
-  fn: (baseUrl: string) => Promise<T>,
-): Promise<T> {
-  const server = createHttpServer(runtime);
-  await new Promise<void>((resolve) => server.listen(0, resolve));
-  const { port } = server.address() as AddressInfo;
-  try {
-    return await fn(`http://127.0.0.1:${port}`);
-  } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve, reject) =>
-      server.close((err) => (err ? reject(err) : resolve())),
-    );
-  }
-}
 
 test('HTTP: an over-limit authorized user request is held for approval, then a manager grants it and the hold is placed', async () => {
   const { db, client } = await createTestDatabase();
