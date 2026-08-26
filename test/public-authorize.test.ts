@@ -16,44 +16,20 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { AddressInfo } from 'node:net';
 import { eq } from 'drizzle-orm';
-import { createHttpServer } from '../src/server/app.js';
-import type { AuthRuntime } from '../src/auth/config.js';
-import type { PgConnection } from '../src/db/client.js';
-import { csrfTokenForSession } from '../src/auth/csrf.js';
-import { signSession } from '../src/auth/session.js';
 import { createSite, addBathroom, issueQrToken } from '../src/admin/service.js';
 import { saveSitePaymentMethod } from '../src/payments/service.js';
 import { siteRoles, users, cleaningRequests, paymentAuthorizations } from '../src/db/schema.js';
 import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
+import { runtimeFor, sessionAndCsrf, withRunningServer } from './helpers/http.js';
 
-const SESSION_SECRET = 'test-session-secret-placeholder';
 // Step-up re-authentication window (SDD §6.4, §9.4): must match src/public/routes.ts.
 const RECENT_AUTH_WINDOW_SECONDS = 300;
-
-function runtimeFor(db: TestDatabase['db']): AuthRuntime {
-  return {
-    cognito: null,
-    sessionSecret: SESSION_SECRET,
-    connection: { db, pool: undefined } as unknown as PgConnection,
-    jwksFor: () => {
-      throw new Error('jwks must not be resolved by these routes');
-    },
-  };
-}
 
 async function insertUser(db: TestDatabase['db'], sub: string): Promise<string> {
   const [row] = await db.insert(users).values({ cognitoSub: sub }).returning();
   assert.ok(row);
   return row.id;
-}
-
-/** `nowSeconds` lets a test mint a session that is already stale for the step-up recency
- * check (SDD §6.4) while still being a validly-signed, unexpired session. */
-function sessionAndCsrf(userId: string, nowSeconds?: number): { cookie: string; csrf: string } {
-  const token = signSession({ userId, sub: `sub-${userId}` }, SESSION_SECRET, nowSeconds);
-  return { cookie: token, csrf: csrfTokenForSession(token, SESSION_SECRET) };
 }
 
 async function seedSiteAndToken(db: TestDatabase['db'], fixedPriceCents = 4500) {
@@ -67,23 +43,6 @@ async function seedSiteAndToken(db: TestDatabase['db'], fixedPriceCents = 4500) 
   const bathroom = await addBathroom(db, site.id, 'Ground floor');
   const issued = await issueQrToken(db, site.id, bathroom.id);
   return { siteId: site.id, bathroomId: bathroom.id, rawToken: issued.rawToken };
-}
-
-async function withRunningServer<T>(
-  runtime: AuthRuntime,
-  fn: (baseUrl: string) => Promise<T>,
-): Promise<T> {
-  const server = createHttpServer(runtime);
-  await new Promise<void>((resolve) => server.listen(0, resolve));
-  const { port } = server.address() as AddressInfo;
-  try {
-    return await fn(`http://127.0.0.1:${port}`);
-  } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve, reject) =>
-      server.close((err) => (err ? reject(err) : resolve())),
-    );
-  }
 }
 
 test('GET /s/:token: anonymous, no-role, pending-member, and wrong-site-manager callers all get the byte-identical neutral page', async () => {

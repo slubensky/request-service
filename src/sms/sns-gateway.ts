@@ -19,8 +19,7 @@ export class SnsSmsGateway implements SmsGateway {
   constructor() {
     // Named APP_AWS_REGION, not AWS_REGION, to stay unambiguous against any
     // AWS-reserved or platform-injected variable of that bare name (see
-    // infra/main.tf's App Runner runtime_environment_variables, which has
-    // set this for both compositions since before this SDK use existed).
+    // infra/modules/ec2_host's user_data.sh.tpl, which sets it).
     this.client = new SNSClient({ region: getEnv('APP_AWS_REGION') ?? 'us-east-1' });
   }
 

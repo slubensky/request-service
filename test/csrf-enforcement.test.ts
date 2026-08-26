@@ -18,27 +18,9 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { AddressInfo } from 'node:net';
-import { createHttpServer } from '../src/server/app.js';
-import type { AuthRuntime } from '../src/auth/config.js';
-import type { PgConnection } from '../src/db/client.js';
-import { csrfTokenForSession } from '../src/auth/csrf.js';
-import { signSession } from '../src/auth/session.js';
 import { sites, users } from '../src/db/schema.js';
 import { createTestDatabase, type TestDatabase } from './helpers/pglite.js';
-
-const SESSION_SECRET = 'test-session-secret-placeholder';
-
-function runtimeFor(db: TestDatabase['db']): AuthRuntime {
-  return {
-    cognito: null,
-    sessionSecret: SESSION_SECRET,
-    connection: { db, pool: undefined } as unknown as PgConnection,
-    jwksFor: () => {
-      throw new Error('jwks must not be resolved by these routes');
-    },
-  };
-}
+import { runtimeFor, sessionAndCsrf, withRunningServer } from './helpers/http.js';
 
 async function insertUser(db: TestDatabase['db'], sub: string, admin: boolean): Promise<string> {
   const [row] = await db
@@ -47,29 +29,6 @@ async function insertUser(db: TestDatabase['db'], sub: string, admin: boolean): 
     .returning();
   assert.ok(row);
   return row.id;
-}
-
-/** A signed session cookie value plus the CSRF token derived from it. */
-function sessionAndCsrf(userId: string): { cookie: string; csrf: string } {
-  const token = signSession({ userId, sub: `sub-${userId}` }, SESSION_SECRET);
-  return { cookie: token, csrf: csrfTokenForSession(token, SESSION_SECRET) };
-}
-
-async function withRunningServer<T>(
-  runtime: AuthRuntime,
-  fn: (baseUrl: string) => Promise<T>,
-): Promise<T> {
-  const server = createHttpServer(runtime);
-  await new Promise<void>((resolve) => server.listen(0, resolve));
-  const { port } = server.address() as AddressInfo;
-  try {
-    return await fn(`http://127.0.0.1:${port}`);
-  } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve, reject) =>
-      server.close((err) => (err ? reject(err) : resolve())),
-    );
-  }
 }
 
 const SITE_FORM = new URLSearchParams({

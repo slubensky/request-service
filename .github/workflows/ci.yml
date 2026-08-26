@@ -51,14 +51,21 @@ jobs:
   terraform-validate:
     name: Terraform validate
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: '1.9.8'
+      # Covers the whole tree (infra/lean/ and the shared infra/modules/),
+      # not just the composition validated below.
       - run: terraform fmt -check -recursive
+        working-directory: infra
+      # infra/lean/ is the only composition left (SDD.md changelog #036 --
+      # the unapplied, never-verified-against-real-AWS production/App Runner
+      # composition was removed). It needs no variable values to validate
+      # and has no backend block (deliberately local state), so this needs
+      # no -backend-config either.
       - run: terraform init -backend=false
+        working-directory: infra/lean
       - run: terraform validate
+        working-directory: infra/lean

@@ -174,7 +174,7 @@ export const paymentAuthorizations = pgTable(
 );
 
 // Mock-only saved payment method (SDD §9.4). Belongs to the Site, not the User who added
-// it -- see docs/phase3-saved-payment-method-plan.md for the rationale. At most one per
+// it -- see docs/archive/phase3-saved-payment-method-plan.md for the rationale. At most one per
 // Site in this phase (unique on site_id). `displayLabel` is always a fixed mock string
 // (e.g. "Mock Visa •••• 4242"), never a real-looking free-text PAN; `gatewayToken` is
 // prefixed `mock_pm_` so it can never be mistaken for a real Stripe payment-method id.

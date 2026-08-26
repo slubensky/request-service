@@ -11,7 +11,7 @@
 import type { IncomingMessage } from 'node:http';
 import type { AuthRuntime } from './config.js';
 import { parseCookies } from './cookies.js';
-import { requiresCsrf, verifyCsrfToken } from './csrf.js';
+import { csrfTokenForSession, requiresCsrf, verifyCsrfToken } from './csrf.js';
 import { SESSION_COOKIE, SESSION_MAX_AGE_SECONDS } from './routes.js';
 import { verifySession, type SessionPayload } from './session.js';
 
@@ -42,6 +42,16 @@ export function sessionAuthenticatedWithin(
   nowSeconds: number = Math.floor(Date.now() / 1000),
 ): boolean {
   return nowSeconds - session.iat <= windowSeconds && session.iat <= nowSeconds;
+}
+
+/**
+ * Derives the CSRF token to embed in a rendered form for this request's
+ * session (see csrf.ts) -- the cookie-read + token-derivation pair every
+ * console/public page that renders a form repeats.
+ */
+export function csrfTokenForRequest(req: IncomingMessage, secret: string): string {
+  const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
+  return csrfTokenForSession(sessionToken, secret);
 }
 
 function headerValue(value: string | string[] | undefined): string | undefined {

@@ -14,12 +14,9 @@
  */
 import type { Router, RouteContext } from '../server/router.js';
 import type { AuthRuntime } from '../auth/config.js';
-import { readSession } from '../auth/guard.js';
+import { readSession, csrfTokenForRequest } from '../auth/guard.js';
 import { authorizeAction } from '../auth/enforce.js';
 import { authorizeOrReject } from '../auth/gate.js';
-import { parseCookies } from '../auth/cookies.js';
-import { SESSION_COOKIE } from '../auth/routes.js';
-import { csrfTokenForSession } from '../auth/csrf.js';
 import { publicBaseUrl } from '../server/base-url.js';
 import { readFormBody, BodyTooLargeError } from '../server/body.js';
 import { sendText } from '../server/respond.js';
@@ -43,7 +40,8 @@ import { renderAdminConsole, renderQrIssued } from '../render/templates/admin.js
 import { renderPaymentsConsole } from '../render/templates/payments.js';
 import { renderQrSvg } from '../qr/image.js';
 import { isDemoMode } from '../demo/config.js';
-import { issueDemoInviteCode, unusedCodesForSiteRoles } from '../demo/service.js';
+import { unusedCodesForSiteRoles } from '../demo/service.js';
+import { respondToInviteOutcome } from '../server/invite-notify.js';
 import type { AppDatabase } from '../db/client.js';
 import {
   cancelCleaningRequest,
@@ -54,7 +52,7 @@ import {
   PaymentAuthorizationNotFoundError,
 } from '../payments/service.js';
 import { MockPaymentGateway, type PaymentGateway } from '../payments/gateway.js';
-import { MockSmsGateway, buildInviteMessage, type SmsGateway } from '../sms/gateway.js';
+import { MockSmsGateway, type SmsGateway } from '../sms/gateway.js';
 
 /** Parses and validates the create-site form. Nothing here is trusted unvalidated. */
 function parseCreateSiteInput(fields: Record<string, string>): ParseResult<CreateSiteInput> {
@@ -106,8 +104,7 @@ async function handleConsole(runtime: AuthRuntime, ctx: RouteContext): Promise<v
     sendText(res, 403, 'Forbidden');
     return;
   }
-  const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
-  const csrfToken = csrfTokenForSession(sessionToken, secret);
+  const csrfToken = csrfTokenForRequest(req, secret);
   const siteList = await listSitesWithBathrooms(db);
   // Demo-only (SDD §6.3): surface the single-use accept code for each pending
   // manager invite. `demoCodesForConsole` returns an empty map off DEMO_MODE, so
@@ -222,34 +219,7 @@ async function handleInviteManager(
     }
     throw error;
   }
-  if (!outcome.created) {
-    // Idempotent no-op (SDD §11.1): the phone already holds a non-revoked role here.
-    sendText(ctx.res, 200, 'That phone is already a member of this site — no new invite created.');
-    return;
-  }
-  // Demo-only (SDD §6.3): mint the single-use accept code so the console can
-  // display it, via the same service the manager console uses; a no-op in
-  // production where DEMO_MODE is off.
-  if (isDemoMode()) {
-    await issueDemoInviteCode(gate.db, outcome.role.id);
-  }
-  // Real SMS invite (no-op under DEMO_MODE, which uses the accept-code loop above
-  // instead): a send failure never blocks or rolls back the already-created invite
-  // (src/sms/gateway.ts) -- it's surfaced in the response so the admin can follow up
-  // another way.
-  if (!isDemoMode()) {
-    const message = buildInviteMessage(outcome.siteName, publicBaseUrl(ctx));
-    const result = await smsGateway.send(phone.value, message);
-    if (!result.sent) {
-      sendText(
-        ctx.res,
-        200,
-        'Invite created, but the text message failed to send. Let them know another way.',
-      );
-      return;
-    }
-  }
-  sendText(ctx.res, 200, 'Invitation sent.');
+  await respondToInviteOutcome(ctx, gate.db, outcome, phone.value, smsGateway);
 }
 
 /** Company Admin revoke of a SiteRole (a Manager) at a site (SDD §11.1, §7). */
@@ -325,8 +295,7 @@ async function handleListPayments(runtime: AuthRuntime, ctx: RouteContext): Prom
     sendText(res, 403, 'Forbidden');
     return;
   }
-  const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
-  const csrfToken = csrfTokenForSession(sessionToken, secret);
+  const csrfToken = csrfTokenForRequest(req, secret);
   const pending = await listPendingCaptures(db);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(renderPaymentsConsole(pending, csrfToken));
