@@ -17,14 +17,17 @@ const COUNTRY_CODES: ReadonlyArray<{ code: string; label: string }> = [
   { code: '+353', label: 'Ireland (+353)' },
 ];
 
+// Doesn't depend on labelText, so it's built once here rather than on every
+// renderPhoneField() call (one per site per admin/manager page render).
+const COUNTRY_OPTIONS_HTML = COUNTRY_CODES.map(
+  ({ code, label }) => `<option value="${code}">${label}</option>`,
+).join('');
+
 export function renderPhoneField(labelText: string): string {
-  const optionsHtml = COUNTRY_CODES.map(
-    ({ code, label }) => `<option value="${code}">${label}</option>`,
-  ).join('');
   return `
           <label>${labelText}
             <span class="phone-field">
-              <select name="phone_country" required aria-label="Country code">${optionsHtml}</select>
+              <select name="phone_country" required aria-label="Country code">${COUNTRY_OPTIONS_HTML}</select>
               <input name="phone_number" required maxlength="20" inputmode="tel" autocomplete="off" placeholder="Phone number" />
             </span>
           </label>`;
