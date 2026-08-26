@@ -16,12 +16,8 @@
  */
 import type { Router, RouteContext } from '../server/router.js';
 import type { AuthRuntime } from '../auth/config.js';
-import { readSession } from '../auth/guard.js';
+import { readSession, csrfTokenForRequest } from '../auth/guard.js';
 import { authorizeOrReject } from '../auth/gate.js';
-import { parseCookies } from '../auth/cookies.js';
-import { SESSION_COOKIE } from '../auth/routes.js';
-import { csrfTokenForSession } from '../auth/csrf.js';
-import { publicBaseUrl } from '../server/base-url.js';
 import { readFormBody, BodyTooLargeError } from '../server/body.js';
 import { sendText } from '../server/respond.js';
 import { requireField, parsePhone, type ParseResult } from '../server/validation.js';
@@ -39,7 +35,8 @@ import {
 import { SiteNotFoundError } from '../admin/service.js';
 import { renderManagerConsole } from '../render/templates/manager.js';
 import { isDemoMode } from '../demo/config.js';
-import { issueDemoInviteCode, unusedCodesForSiteRoles } from '../demo/service.js';
+import { unusedCodesForSiteRoles } from '../demo/service.js';
+import { respondToInviteOutcome } from '../server/invite-notify.js';
 import { getSitePaymentMethod } from '../payments/service.js';
 import {
   approveRequest,
@@ -50,7 +47,7 @@ import {
   type PendingApprovalView,
 } from '../payments/approvals.js';
 import { MockPaymentGateway, type PaymentGateway } from '../payments/gateway.js';
-import { MockSmsGateway, buildInviteMessage, type SmsGateway } from '../sms/gateway.js';
+import { MockSmsGateway, type SmsGateway } from '../sms/gateway.js';
 import type { AppDatabase } from '../db/client.js';
 
 // Per-user budget for invite creation: generous for genuine onboarding, low
@@ -107,8 +104,7 @@ async function handleConsole(runtime: AuthRuntime, ctx: RouteContext): Promise<v
     db,
     managedSites.map((entry) => entry.site.id),
   );
-  const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
-  const csrfToken = csrfTokenForSession(sessionToken, secret);
+  const csrfToken = csrfTokenForRequest(req, secret);
   // Demo-only (SDD §6.3): surface the single-use accept code for each pending
   // invite. Empty (and unrendered) whenever DEMO_MODE is off.
   const demoCodes = await demoCodesForConsole(db, managedSites);
@@ -192,37 +188,7 @@ function registerInviteHandler(
       }
       throw error;
     }
-    if (!outcome.created) {
-      // Idempotent no-op (SDD §11.4): the phone already holds a non-revoked role here.
-      sendText(
-        ctx.res,
-        200,
-        'That phone is already a member of this site — no new invite created.',
-      );
-      return;
-    }
-    // Demo-only (SDD §6.3): mint the single-use accept code so the console can
-    // display it; a no-op in production where DEMO_MODE is off.
-    if (isDemoMode()) {
-      await issueDemoInviteCode(gate.db, outcome.role.id);
-    }
-    // Real SMS invite (no-op under DEMO_MODE, which uses the accept-code loop above
-    // instead): a send failure never blocks or rolls back the already-created invite
-    // (src/sms/gateway.ts) -- it's surfaced in the response so the manager can follow
-    // up another way.
-    if (!isDemoMode()) {
-      const message = buildInviteMessage(outcome.siteName, publicBaseUrl(ctx));
-      const result = await smsGateway.send(phone.value, message);
-      if (!result.sent) {
-        sendText(
-          ctx.res,
-          200,
-          'Invite created, but the text message failed to send. Let them know another way.',
-        );
-        return;
-      }
-    }
-    sendText(ctx.res, 200, 'Invitation sent.');
+    await respondToInviteOutcome(ctx, gate.db, outcome, phone.value, smsGateway);
   });
 }
 

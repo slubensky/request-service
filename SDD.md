@@ -741,6 +741,30 @@ here. Format:
 - **Timestamp:** ISO-8601 date-time with UTC offset, in the America/New_York time zone.
 - **Description:** a concise statement of what changed and why.
 
+### #037 — 2026-08-26T12:00:00-04:00
+
+**Simplification (no product-facing change)**: second step of the same
+complexity-reduction pass as #036. Two small duplicated blocks, both flagged
+by the review agents, extracted with no behavior change (218 tests pass
+unmodified):
+
+- `admin/routes.ts`'s `handleInviteManager` and `manager/routes.ts`'s invite
+  handler each repeated the same ~35-line tail after creating a SiteRole:
+  report an idempotent "already a member" no-op, else mint a demo accept
+  code (DEMO_MODE) or send the real invite SMS, then respond. Extracted to
+  `respondToInviteOutcome` in new `src/server/invite-notify.ts`, called by
+  both.
+- The `parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? ''` +
+  `csrfTokenForSession(...)` pair -- deriving the CSRF token to embed in a
+  rendered form -- was repeated 5 times across `admin/routes.ts` (x2),
+  `manager/routes.ts`, and `public/routes.ts` (x2). Extracted to
+  `csrfTokenForRequest(req, secret)` in `auth/guard.ts`, alongside the
+  existing `readSession`.
+
+Verified: `npm run lint` / `npm run build` / `npm test` (218 passing,
+unmodified -- confirms the extraction preserved behavior rather than just
+not being caught).
+
 ### #036 — 2026-08-26T11:00:00-04:00
 
 **Simplification (infra, no product-facing change)**: removed the unapplied

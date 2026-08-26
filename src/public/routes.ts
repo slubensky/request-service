@@ -33,12 +33,9 @@ import {
   renderReauthRequiredPage,
   renderRequestApprovalPage,
 } from '../render/templates/confirm.js';
-import { readSession, sessionAuthenticatedWithin } from '../auth/guard.js';
+import { readSession, sessionAuthenticatedWithin, csrfTokenForRequest } from '../auth/guard.js';
 import type { SessionPayload } from '../auth/session.js';
 import { authorizeAction } from '../auth/enforce.js';
-import { parseCookies } from '../auth/cookies.js';
-import { SESSION_COOKIE } from '../auth/routes.js';
-import { csrfTokenForSession } from '../auth/csrf.js';
 import { sendText } from '../server/respond.js';
 import { sites } from '../db/schema.js';
 import {
@@ -149,8 +146,7 @@ async function tryRenderConfirmPage(
   if (!site) {
     return null;
   }
-  const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
-  const csrfToken = csrfTokenForSession(sessionToken, runtime.sessionSecret);
+  const csrfToken = csrfTokenForRequest(req, runtime.sessionSecret);
   if (decision.allowed) {
     return renderSiteAuthorizedState(
       db,
@@ -337,8 +333,7 @@ export function registerPublicRoutes(
       sendText(res, 404, 'Site not found');
       return;
     }
-    const sessionToken = parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? '';
-    const csrfToken = csrfTokenForSession(sessionToken, runtime.sessionSecret);
+    const csrfToken = csrfTokenForRequest(req, runtime.sessionSecret);
     const html = await renderSiteAuthorizedState(
       db,
       session,
